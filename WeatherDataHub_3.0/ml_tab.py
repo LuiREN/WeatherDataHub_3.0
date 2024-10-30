@@ -126,6 +126,40 @@ class MLTab(QWidget):
         self.train_btn.setEnabled(False)
         self.train_btn.clicked.connect(self.train_model)
         sarima_layout.addWidget(self.train_btn)
+
+        # Сезонные параметры P, D, Q, s
+        seasonal_layout = QHBoxLayout()
+        seasonal_layout.addWidget(QLabel("P:"))
+        self.P_spin = QSpinBox()
+        self.P_spin.setRange(0, 2)
+        self.P_spin.setValue(1)
+        seasonal_layout.addWidget(self.P_spin)
+        
+        seasonal_layout.addWidget(QLabel("D:"))
+        self.D_spin = QSpinBox()
+        self.D_spin.setRange(0, 1)
+        self.D_spin.setValue(1)
+        seasonal_layout.addWidget(self.D_spin)
+        
+        seasonal_layout.addWidget(QLabel("Q:"))
+        self.Q_spin = QSpinBox()
+        self.Q_spin.setRange(0, 2)
+        self.Q_spin.setValue(1)
+        seasonal_layout.addWidget(self.Q_spin)
+        
+        seasonal_layout.addWidget(QLabel("s:"))
+        self.s_spin = QSpinBox()
+        self.s_spin.setRange(1, 24)
+        self.s_spin.setValue(12)  # 12 месяцев по умолчанию
+        seasonal_layout.addWidget(self.s_spin)
+        
+        sarima_layout.addLayout(seasonal_layout)
+
+        # Кнопка подбора гиперпараметров
+        self.tune_btn = QPushButton("Подобрать гиперпараметры")
+        self.tune_btn.setEnabled(False)
+        self.tune_btn.clicked.connect(self.tune_hyperparameters)
+        sarima_layout.addWidget(self.tune_btn)
         
         sarima_group.setLayout(sarima_layout)
         layout.addWidget(sarima_group)
