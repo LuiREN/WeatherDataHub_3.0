@@ -5,6 +5,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QGroupBox, QMessageBox, QSpinBox
 )
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import os
+from datetime import datetime
 from PyQt6.QtCore import Qt
 import logging
 from optimized_table import OptimizedTableWidget
@@ -16,7 +22,10 @@ class MLTab(QWidget):
         self.current_file: Optional[str] = None
         self.train_data: Optional[pd.DataFrame] = None
         self.test_data: Optional[pd.DataFrame] = None
-        
+        self.best_model = None
+        self.best_score = float('inf')
+        self.model_results = []
+
         # Настройка логирования
         self.setup_logging()
         
@@ -85,6 +94,41 @@ class MLTab(QWidget):
         self.split_data_btn.setEnabled(False)
         self.split_data_btn.clicked.connect(self.split_data)
         data_layout.addWidget(self.split_data_btn)
+
+        # Группа настройки SARIMA
+        sarima_group = QGroupBox("Настройка SARIMA")
+        sarima_layout = QVBoxLayout()
+        
+        # Параметры p, d, q
+        pdq_layout = QHBoxLayout()
+        pdq_layout.addWidget(QLabel("p:"))
+        self.p_spin = QSpinBox()
+        self.p_spin.setRange(0, 5)
+        self.p_spin.setValue(1)
+        pdq_layout.addWidget(self.p_spin)
+        
+        pdq_layout.addWidget(QLabel("d:"))
+        self.d_spin = QSpinBox()
+        self.d_spin.setRange(0, 2)
+        self.d_spin.setValue(1)
+        pdq_layout.addWidget(self.d_spin)
+        
+        pdq_layout.addWidget(QLabel("q:"))
+        self.q_spin = QSpinBox()
+        self.q_spin.setRange(0, 5)
+        self.q_spin.setValue(1)
+        pdq_layout.addWidget(self.q_spin)
+        
+        sarima_layout.addLayout(pdq_layout)
+        
+        # Кнопка обучения
+        self.train_btn = QPushButton("Обучить модель")
+        self.train_btn.setEnabled(False)
+        self.train_btn.clicked.connect(self.train_model)
+        sarima_layout.addWidget(self.train_btn)
+        
+        sarima_group.setLayout(sarima_layout)
+        layout.addWidget(sarima_group)
         
         data_group.setLayout(data_layout)
         layout.addWidget(data_group)
@@ -203,6 +247,176 @@ class MLTab(QWidget):
                 f"Обучающая выборка: {len(self.train_data)} записей\n"
                 f"Тестовая выборка: {len(self.test_data)} записей"
             )
+            
+            self.logger.info(
+                f"Данные разделены на выборки: "
+                f"обучающая - {len(self.train_data)}, "
+                f"тестовая - {len(self.test_data)}"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при разделении данных: {str(e)}")
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при разделении данных: {str(e)}")
+
+    def train_model(self) -> None:
+        """Обучение модели SARIMA с текущими параметрами."""
+        if self.train_data is None or self.test_data is None:
+            QMessageBox.warning(self, "Ошибка", "Сначала разделите данные")
+            return
+            
+        try:
+            # Получаем параметры модели
+            order = (
+                self.p_spin.value(),
+                self.d_spin.value(),
+                self.q_spin.value()
+            )
+            
+            # Создаем и обучаем модель
+            model = SARIMAX(
+                self.train_data['temperature_day'],
+                order=order,
+                seasonal_order=(0, 0, 0, 0)  # Пока без сезонности
+            )
+            
+            self.logger.info(f"Начало обучения модели с параметрами {order}")
+            fitted_model = model.fit(disp=False)
+            
+            # Делаем прогноз
+            predictions = fitted_model.get_forecast(len(self.test_data))
+            predicted_values = predictions.predicted_mean
+            
+            # Оцениваем качество
+            mse = mean_squared_error(self.test_data['temperature_day'], predicted_values)
+            r2 = r2_score(self.test_data['temperature_day'], predicted_values)
+            
+            # Сохраняем результаты
+            result = {
+                'order': order,
+                'mse': mse,
+                'r2': r2,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            self.model_results.append(result)
+            
+            # Обновляем лучшую модель если нужно
+            if mse < self.best_score:
+                self.best_score = mse
+                self.best_model = fitted_model
+                self.logger.info(f"Новая лучшая модель: MSE={mse:.4f}, R2={r2:.4f}")
+            
+            # Строим график
+            self.plot_predictions(predicted_values)
+            
+            # Выводим результаты
+            self.info_label.setText(
+                f"Модель обучена:\n"
+                f"MSE: {mse:.4f}\n"
+                f"R2: {r2:.4f}"
+            )
+            
+            # Создаем директорию для результатов если её нет
+            os.makedirs('ml_results', exist_ok=True)
+            
+            # Сохраняем результаты в файл
+            self.save_results()
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при обучении модели: {str(e)}")
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при обучении модели: {str(e)}")
+
+    def plot_predictions(self, predictions) -> None:
+        """
+        Построение графика прогноза.
+        
+        Args:
+            predictions: Предсказанные значения
+        """
+        try:
+            # Очищаем предыдущий график
+            for i in reversed(range(self.right_panel.layout().count())): 
+                widget = self.right_panel.layout().itemAt(i).widget()
+                if isinstance(widget, FigureCanvas):
+                    widget.deleteLater()
+            
+            # Создаем новый график
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Строим фактические значения
+            ax.plot(
+                self.test_data.index,
+                self.test_data['temperature_day'],
+                label='Фактические значения'
+            )
+            
+            # Строим предсказанные значения
+            ax.plot(
+                self.test_data.index,
+                predictions,
+                label='Прогноз',
+                linestyle='--'
+            )
+            
+            ax.set_title('Прогноз температуры')
+            ax.set_xlabel('Дата')
+            ax.set_ylabel('Температура')
+            ax.legend()
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            
+            # Создаем виджет с графиком
+            canvas = FigureCanvas(fig)
+            self.right_panel.layout().addWidget(canvas)
+            
+            # Сохраняем график
+            plt.savefig('ml_results/prediction_plot.png')
+            plt.close()
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при построении графика: {str(e)}")
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при построении графика: {str(e)}")
+
+    def save_results(self) -> None:
+        """Сохранение результатов обучения в файл."""
+        try:
+            with open('ml_results/training_results.txt', 'w', encoding='utf-8') as f:
+                f.write("Результаты обучения моделей SARIMA\n")
+                f.write("=" * 50 + "\n\n")
+                
+                for result in self.model_results:
+                    f.write(f"Время: {result['timestamp']}\n")
+                    f.write(f"Параметры (p,d,q): {result['order']}\n")
+                    f.write(f"MSE: {result['mse']:.4f}\n")
+                    f.write(f"R2: {result['r2']:.4f}\n")
+                    f.write("-" * 50 + "\n\n")
+                    
+            self.logger.info("Результаты сохранены в файл")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при сохранении результатов: {str(e)}")
+
+    def split_data(self) -> None:
+        """Разделение данных на обучающую и тестовую выборки."""
+        if self.df is None:
+            return
+            
+        try:
+            test_size = self.test_size_spin.value() / 100
+            split_idx = int(len(self.df) * (1 - test_size))
+            
+            self.train_data = self.df.iloc[:split_idx].copy()
+            self.test_data = self.df.iloc[split_idx:].copy()
+            
+            self.data_preview.load_data(self.train_data.reset_index())
+            
+            self.info_label.setText(
+                f"Данные разделены:\n"
+                f"Обучающая выборка: {len(self.train_data)} записей\n"
+                f"Тестовая выборка: {len(self.test_data)} записей"
+            )
+            
+            # Активируем кнопку обучения
+            self.train_btn.setEnabled(True)
             
             self.logger.info(
                 f"Данные разделены на выборки: "
