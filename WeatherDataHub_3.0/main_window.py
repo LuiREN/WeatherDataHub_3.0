@@ -17,6 +17,7 @@ from optimized_table import OptimizedTableWidget
 from annotation import create_annotation_file, read_annotation_file
 from date_widget import DateDataWidget
 from data_analysis import DataAnalysisTab
+from ml_tab import MLTab
 from styles import get_styles
 
 
@@ -67,10 +68,14 @@ class MainWindow(QMainWindow):
         
         # Создаем вкладку анализа данных
         self.analysis_tab = DataAnalysisTab()
+
+         # Создаем вкладку машинного обучения
+        self.ml_tab = MLTab()
         
         # Добавляем вкладки
         self.tab_widget.addTab(self.main_tab, "Основные операции")
         self.tab_widget.addTab(self.analysis_tab, "Анализ данных")
+        self.tab_widget.addTab(self.ml_tab, "Машинное обучение")
         
         self.setCentralWidget(self.tab_widget)
 
@@ -210,7 +215,10 @@ class MainWindow(QMainWindow):
             return
         self.data_preview.load_data(df)
         # Добавляем загрузку данных во вкладку анализа
+        # Добавляем загрузку данных во вкладки анализа и машинного обучения
         self.analysis_tab.load_data(df, data if isinstance(data, str) else None)
+        self.ml_tab.load_data(df, data if isinstance(data, str) else None)
+
 
     def create_annotation(self) -> None:
         """Создает файл аннотации для текущего набора данных."""
