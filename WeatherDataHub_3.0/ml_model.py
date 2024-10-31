@@ -125,8 +125,23 @@ class WeatherModel:
         """
         try:
             self.logger.info(f"Начало обучения модели с параметрами: order={order}, seasonal_order={seasonal_order}")
-            model = SARIMAX(train_data['temperature_day'], order=order, seasonal_order=seasonal_order)
+            
+            # Проверяем и устанавливаем частоту данных
+            if not train_data.index.freq:
+                train_data = train_data.asfreq('D')
+                self.logger.info("Установлена дневная частота данных")
+            
+            # Создание и обучение модели
+            model = SARIMAX(
+                train_data['temperature_day'],
+                order=order,
+                seasonal_order=seasonal_order,
+                enforce_stationarity=False,  # Отключаем принудительную стационарность
+                enforce_invertibility=False   # Отключаем принудительную обратимость
+            )
+            
             self.model = model.fit(disp=False)
+            
             self.logger.info("Модель успешно обучена")
             
             return {
@@ -158,8 +173,18 @@ class WeatherModel:
         try:
             if self.model is None:
                 raise ValueError("Модель не обучена")
+                
             self.logger.info(f"Прогнозирование на {steps} шагов вперед")
-            return self.model.forecast(steps)
+            
+            # Получаем прогноз с доверительными интервалами
+            forecast_result = self.model.get_forecast(steps)
+            predictions = forecast_result.predicted_mean
+            
+            # Можно также получить доверительные интервалы
+            conf_int = forecast_result.conf_int()
+            
+            return predictions
+            
         except Exception as e:
             self.logger.error(f"Ошибка при прогнозировании: {str(e)}")
             return None

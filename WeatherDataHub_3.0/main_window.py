@@ -17,7 +17,7 @@ from optimized_table import OptimizedTableWidget
 from annotation import create_annotation_file, read_annotation_file
 from date_widget import DateDataWidget
 from data_analysis import DataAnalysisTab
-from ml_tab import MLTab
+from ml_interface import MLTab
 from styles import get_styles
 
 

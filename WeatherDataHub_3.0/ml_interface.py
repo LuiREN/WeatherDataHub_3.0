@@ -1,8 +1,8 @@
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QGroupBox, QMessageBox, QSpinBox,
-    QFrame, QFileDialog, QProgressBar
+    QFrame, QFileDialog, QProgressBar,QTableWidget,QTableWidgetItem
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -225,47 +225,55 @@ class MLTab(QWidget):
         return group
 
     def create_right_panel(self) -> QFrame:
-        """
-        Создание правой панели для отображения результатов.
-        
-        Returns:
-            QFrame: Виджет правой панели
-        """
+        """Создание правой панели для отображения результатов."""
         panel = QFrame()
         panel.setFrameStyle(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout(panel)
-        
+    
         # Информационная метка
         self.info_label = QLabel("Загрузите данные для начала работы")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_label.setFont(QFont("Arial", 12))
         layout.addWidget(self.info_label)
-        
+    
+        # Таблица для отображения результатов
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(2)
+        self.results_table.setHorizontalHeaderLabels(["Параметр", "Значение"])
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.results_table)
+    
         # Область для графиков
         self.plot_frame = QFrame()
         self.plot_frame.setFrameStyle(QFrame.Shape.StyledPanel)
         self.plot_frame.setMinimumHeight(400)
         layout.addWidget(self.plot_frame)
-        
+    
         return panel
+
+    def update_results_table(self, results: Dict[str, Any]) -> None:
+        """Обновление таблицы результатов."""
+        self.results_table.setRowCount(0)
+        for param, value in results.items():
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            self.results_table.setItem(row, 0, QTableWidgetItem(str(param)))
+            self.results_table.setItem(row, 1, QTableWidgetItem(str(value)))
 
     def load_data(self, df: pd.DataFrame, filename: Optional[str] = None) -> None:
         """
         Загрузка данных для анализа.
-        
+    
         Args:
             df: DataFrame с данными
             filename: Имя файла (опционально)
         """
         try:
-            if self.data_handler.validate_data(df):
-                self.df = df
-                self.prepare_btn.setEnabled(True)
-                self.info_label.setText("Данные загружены успешно")
-                self.logger.info("Данные загружены успешно")
-            else:
-                QMessageBox.warning(self, "Ошибка", "Некорректные данные")
-                
+            self.df = df.copy()
+            self.prepare_btn.setEnabled(True)
+            self.info_label.setText("Данные загружены. Нажмите 'Подготовить данные' для начала анализа")
+            self.logger.info("Данные загружены успешно")
+            
         except Exception as e:
             self.logger.error(f"Ошибка при загрузке данных: {str(e)}")
             QMessageBox.critical(self, "Ошибка", f"Ошибка при загрузке данных: {str(e)}")
@@ -273,10 +281,30 @@ class MLTab(QWidget):
     def prepare_data(self) -> None:
         """Подготовка данных для анализа."""
         try:
-            self.prepared_data = self.data_handler.prepare_data(self.df)
-            self.split_btn.setEnabled(True)
-            self.info_label.setText("Данные подготовлены")
-            self.logger.info("Данные подготовлены")
+            if not self.df is None:
+                # Преобразование даты и установка частоты
+                df = self.df.copy()
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df = df.asfreq('D')  # Установка дневной частоты
+            
+                # Обработка пропущенных значений
+                if df['temperature_day'].isnull().any():
+                    df['temperature_day'].interpolate(method='time', inplace=True)
+            
+                self.prepared_data = df
+                self.split_btn.setEnabled(True)
+            
+                # Обновляем таблицу результатов
+                results = {
+                    'Количество записей': len(df),
+                    'Период данных': f"с {df.index.min().date()} по {df.index.max().date()}",
+                    'Пропущенные значения': df.isnull().sum().to_dict()
+                }
+                self.update_results_table(results)
+            
+                self.info_label.setText("Данные подготовлены успешно")
+                self.logger.info("Данные подготовлены")
             
         except Exception as e:
             self.logger.error(f"Ошибка при подготовке данных: {str(e)}")
@@ -286,22 +314,26 @@ class MLTab(QWidget):
         """Разделение данных на обучающую и тестовую выборки."""
         try:
             test_size = self.test_size_spin.value() / 100
-            self.train_data, self.test_data = self.data_handler.split_data(
-                self.prepared_data, 
-                test_size
-            )
-            
+            split_idx = int(len(self.prepared_data) * (1 - test_size))
+        
+            self.train_data = self.prepared_data.iloc[:split_idx].copy()
+            self.test_data = self.prepared_data.iloc[split_idx:].copy()
+        
+            # Обновляем таблицу результатов
+            results = {
+                'Размер обучающей выборки': len(self.train_data),
+                'Размер тестовой выборки': len(self.test_data),
+                'Период обучающей выборки': f"с {self.train_data.index.min().date()} по {self.train_data.index.max().date()}",
+                'Период тестовой выборки': f"с {self.test_data.index.min().date()} по {self.test_data.index.max().date()}"
+            }
+            self.update_results_table(results)
+        
             self.train_btn.setEnabled(True)
             self.tune_btn.setEnabled(True)
-            
-            self.info_label.setText(
-                f"Данные разделены:\n"
-                f"Обучающая выборка: {len(self.train_data)} записей\n"
-                f"Тестовая выборка: {len(self.test_data)} записей"
-            )
-            
+        
+            self.info_label.setText("Данные успешно разделены")
             self.logger.info("Данные разделены на выборки")
-            
+        
         except Exception as e:
             self.logger.error(f"Ошибка при разделении данных: {str(e)}")
             QMessageBox.critical(self, "Ошибка", f"Ошибка при разделении данных: {str(e)}")
