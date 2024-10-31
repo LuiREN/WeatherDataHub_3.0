@@ -27,7 +27,7 @@
     <Compile Include="data_preprocessing.py" />
     <Compile Include="date_widget.py" />
     <Compile Include="main_window.py" />
-    <Compile Include="ml_tab.py">
+    <Compile Include="ml_model.py">
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="optimized_table.py" />
