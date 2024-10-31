@@ -30,6 +30,9 @@
     <Compile Include="ml_data_handler.py">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="ml_interface.py">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="ml_model.py">
       <SubType>Code</SubType>
     </Compile>
