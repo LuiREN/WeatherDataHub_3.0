@@ -17,6 +17,13 @@ class DataHandler:
         """Инициализация обработчика данных."""
         self.setup_logger()
         self.setup_directories()
+        self.data_columns = {
+            'required': ['date', 'temperature_day', 'temperature_evening', 
+                        'pressure_day', 'pressure_evening'],
+            'binary': ['cloudiness_day_clear', 'cloudiness_day_partly_cloudy',
+                      'cloudiness_day_variable', 'cloudiness_day_overcast'],
+            'wind': ['wind_speed_day', 'wind_speed_evening']
+        }
 
     def setup_logger(self) -> None:
         """Настройка системы логирования."""
@@ -42,82 +49,101 @@ class DataHandler:
             os.makedirs(directory, exist_ok=True)
 
     def validate_data(self, df: pd.DataFrame) -> bool:
-        """
-        Проверка корректности данных погоды.
-        
-        Args:
-            df: DataFrame для проверки
-            
-        Returns:
-            bool: True если данные корректны
-        """
+        """Улучшенная валидация данных."""
         try:
-            # Проверяем наличие необходимых столбцов
-            required_columns = {
-                'date', 'temperature_day', 'temperature_evening',
-                'pressure_day', 'pressure_evening'
-            }
-            
-            if not required_columns.issubset(df.columns):
-                missing = required_columns - set(df.columns)
+            # Проверка обязательных столбцов
+            missing = self.data_columns['required'] - set(df.columns)
+            if missing:
                 self.logger.error(f"Отсутствуют столбцы: {missing}")
                 return False
             
-            # Проверяем формат даты
+            # Проверка формата даты
             try:
                 pd.to_datetime(df['date'])
             except:
                 self.logger.error("Некорректный формат даты")
                 return False
             
-            # Проверяем типы данных температуры
-            numeric_columns = ['temperature_day', 'temperature_evening', 
-                             'pressure_day', 'pressure_evening']
-            for col in numeric_columns:
-                if not pd.to_numeric(df[col], errors='coerce').notnull().all():
-                    self.logger.error(f"Некорректные значения в столбце {col}")
-                    return False
+            # Проверка допустимых значений для бинарных признаков
+            for col in self.data_columns['binary']:
+                if col in df.columns:
+                    if not df[col].isin([0, 1, np.nan]).all():
+                        self.logger.error(f"Некорректные значения в столбце {col}")
+                        return False
+            
+            # Проверка диапазонов для числовых признаков
+            value_ranges = {
+                'temperature_day': (-60, 60),
+                'temperature_evening': (-60, 60),
+                'pressure_day': (700, 800),
+                'pressure_evening': (700, 800),
+                'wind_speed_day': (0, 100),
+                'wind_speed_evening': (0, 100)
+            }
+            
+            for col, (min_val, max_val) in value_ranges.items():
+                if col in df.columns:
+                    valid_mask = df[col].between(min_val, max_val) | df[col].isna()
+                    if not valid_mask.all():
+                        self.logger.error(f"Значения вне допустимого диапазона в {col}")
+                        return False
             
             return True
             
         except Exception as e:
-            self.logger.error(f"Ошибка при валидации данных: {str(e)}")
+            self.logger.error(f"Ошибка при валидации: {str(e)}")
             return False
 
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Подготовка данных для анализа.
-        
-        Args:
-            df: Исходный DataFrame
-            
-        Returns:
-            pd.DataFrame: Подготовленный DataFrame
-        """
+        """Улучшенная подготовка данных."""
         try:
-            self.logger.info("Начало подготовки данных")
-            
-            # Создаем копию данных
             prepared_df = df.copy()
             
-            # Преобразование даты
+            # Преобразование даты и установка индекса
             prepared_df['date'] = pd.to_datetime(prepared_df['date'])
             prepared_df.set_index('date', inplace=True)
-            
-            # Сортировка по дате
             prepared_df.sort_index(inplace=True)
             
-            # Заполнение пропущенных значений
+            # Обработка выбросов для температуры
+            for col in ['temperature_day', 'temperature_evening']:
+                Q1 = prepared_df[col].quantile(0.25)
+                Q3 = prepared_df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                prepared_df[col] = prepared_df[col].clip(
+                    lower=Q1 - 2*IQR, 
+                    upper=Q3 + 2*IQR
+                )
+            
+            # Интерполяция пропущенных значений
             numeric_columns = ['temperature_day', 'temperature_evening', 
                              'pressure_day', 'pressure_evening']
             
             for col in numeric_columns:
+                # Сначала пробуем сезонную интерполяцию
+                prepared_df[col] = prepared_df[col].interpolate(
+                    method='time', 
+                    limit_direction='both', 
+                    order=3
+                )
+                
+                # Если остались пропуски, используем линейную интерполяцию
                 if prepared_df[col].isnull().any():
-                    # Используем линейную интерполяцию для временного ряда
-                    prepared_df[col] = prepared_df[col].interpolate(method='time')
+                    prepared_df[col] = prepared_df[col].interpolate(
+                        method='linear',
+                        limit_direction='both'
+                    )
             
-            # Убедимся, что нет пропущенных значений в начале и конце
-            prepared_df = prepared_df.fillna(method='bfill').fillna(method='ffill')
+            # Заполнение пропусков в бинарных признаках
+            binary_columns = self.data_columns['binary']
+            prepared_df[binary_columns] = prepared_df[binary_columns].fillna(0)
+            
+            # Обработка пропусков в скорости ветра
+            wind_columns = self.data_columns['wind']
+            for col in wind_columns:
+                if col in prepared_df.columns:
+                    prepared_df[col] = prepared_df[col].fillna(
+                        prepared_df[col].rolling(window=3, min_periods=1).mean()
+                    )
             
             # Проверяем частоту данных
             if not prepared_df.index.freq:
