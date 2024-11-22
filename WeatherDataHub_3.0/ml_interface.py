@@ -1,585 +1,823 @@
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Tuple
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-    QLabel, QGroupBox, QMessageBox, QSpinBox,
-    QFrame, QFileDialog, QProgressBar,QTableWidget,QTableWidgetItem
+    QLabel, QSpinBox, QGroupBox, QMessageBox, 
+    QTableWidget, QTableWidgetItem, QProgressBar, QFrame
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 import pandas as pd
-import logging
-from ml_model import WeatherModel
-from ml_data_handler import DataHandler
-from ml_visualization import ModelVisualizer
-import os
+import numpy as np
 from datetime import datetime
+import logging
+import os
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from ml_model import WeatherModel
 
 class MLTab(QWidget):
-    """
-    Вкладка машинного обучения для прогнозирования погоды.
-    
-    Attributes:
-        data_handler: Обработчик данных
-        model: Модель прогнозирования
-        visualizer: Визуализатор результатов
-        logger: Логгер для записи операций
-    """
-    
     def __init__(self, parent: Optional[QWidget] = None):
         """Инициализация вкладки машинного обучения."""
         super().__init__(parent)
-        
-        # Инициализация компонентов
-        self.data_handler = DataHandler()
+        self.df = None
         self.model = WeatherModel()
-        self.visualizer = ModelVisualizer()
-        
-        # Инициализация данных
         self.train_data = None
         self.test_data = None
-        self.current_predictions = None
         
-        # Настройка интерфейса и логирования
+        # Инициализация интерфейса
         self.setup_logger()
         self.init_ui()
 
     def setup_logger(self) -> None:
-        """Настройка системы логирования."""
+        """Настройка логирования."""
         self.logger = logging.getLogger('MLInterface')
         self.logger.setLevel(logging.INFO)
-        handler = logging.FileHandler('ml_interface.log')
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        
+        if not os.path.exists('logs'):
+            os.makedirs('logs')
+            
+        handler = logging.FileHandler('logs/ml_interface.log')
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
     def init_ui(self) -> None:
         """Инициализация пользовательского интерфейса."""
-        layout = QHBoxLayout(self)
+        layout = QHBoxLayout()
         
-        # Создание панелей
+        # Создаем панели
         left_panel = self.create_left_panel()
         right_panel = self.create_right_panel()
         
-        # Добавление панелей в главный layout
-        layout.addWidget(left_panel, stretch=1)  # 40% ширины
-        layout.addWidget(right_panel, stretch=2)  # 60% ширины
+        # Добавляем панели в главный layout
+        layout.addWidget(left_panel, stretch=2)  # 40%
+        layout.addWidget(right_panel, stretch=3)  # 60%
+        
+        self.setLayout(layout)
 
     def create_left_panel(self) -> QFrame:
-        """
-        Создание левой панели с элементами управления.
-        
-        Returns:
-            QFrame: Виджет левой панели
-        """
+        """Создание левой панели управления."""
         panel = QFrame()
         panel.setFrameStyle(QFrame.Shape.StyledPanel)
-        layout = QVBoxLayout(panel)
-        
-        # Группа подготовки данных
-        data_group = self.create_data_group()
-        layout.addWidget(data_group)
-        
-        # Группа параметров модели
-        model_group = self.create_model_group()
-        layout.addWidget(model_group)
-        
-        # Группа обучения
-        training_group = self.create_training_group()
-        layout.addWidget(training_group)
-        
-        # Индикатор прогресса
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
-        layout.addStretch()
-        return panel
-
-    def create_data_group(self) -> QGroupBox:
-        """
-        Создание группы элементов для работы с данными.
-        
-        Returns:
-            QGroupBox: Группа элементов для данных
-        """
-        group = QGroupBox("Подготовка данных")
-        layout = QVBoxLayout(group)
-        
+        layout = QVBoxLayout()
+    
+        # 1. Группа подготовки данных
+        data_group = QGroupBox("Подготовка данных")
+        data_layout = QVBoxLayout()
+    
         # Размер тестовой выборки
         test_size_layout = QHBoxLayout()
-        test_size_layout.addWidget(QLabel("Размер тестовой выборки:"))
+        test_size_layout.addWidget(QLabel("Тестовая выборка:"))
         self.test_size_spin = QSpinBox()
         self.test_size_spin.setRange(10, 40)
         self.test_size_spin.setValue(20)
         self.test_size_spin.setSuffix("%")
         test_size_layout.addWidget(self.test_size_spin)
-        layout.addLayout(test_size_layout)
-        
-        # Кнопки для работы с данными
+        data_layout.addLayout(test_size_layout)
+    
+        # Кнопка подготовки данных
         self.prepare_btn = QPushButton("Подготовить данные")
         self.prepare_btn.clicked.connect(self.prepare_data)
         self.prepare_btn.setEnabled(False)
-        layout.addWidget(self.prepare_btn)
-        
-        self.split_btn = QPushButton("Разделить данные")
-        self.split_btn.clicked.connect(self.split_data)
-        self.split_btn.setEnabled(False)
-        layout.addWidget(self.split_btn)
-        
-        return group
+        data_layout.addWidget(self.prepare_btn)
+    
+        data_group.setLayout(data_layout)
 
-    def create_model_group(self) -> QGroupBox:
-        """
-        Создание группы элементов для настройки модели.
-        
-        Returns:
-            QGroupBox: Группа элементов настройки модели
-        """
-        group = QGroupBox("Параметры SARIMA")
-        layout = QVBoxLayout(group)
-        
+        # 2. Группа анализа временного ряда
+        analysis_group = QGroupBox("Анализ временного ряда")
+        analysis_layout = QVBoxLayout()
+    
+        # Кнопка анализа
+        self.analyze_btn = QPushButton("Анализировать данные")
+        self.analyze_btn.clicked.connect(self.analyze_time_series)
+        self.analyze_btn.setEnabled(False)
+        analysis_layout.addWidget(self.analyze_btn)
+    
+        analysis_group.setLayout(analysis_layout)
+    
+        # 3. Группа параметров SARIMA
+        model_group = QGroupBox("Параметры SARIMA")
+        model_layout = QVBoxLayout()
+    
         # Параметры p, d, q
         pdq_layout = QHBoxLayout()
-        
-        # p parameter
+    
         pdq_layout.addWidget(QLabel("p:"))
         self.p_spin = QSpinBox()
         self.p_spin.setRange(0, 3)
         self.p_spin.setValue(1)
         pdq_layout.addWidget(self.p_spin)
-        
-        # d parameter
+    
         pdq_layout.addWidget(QLabel("d:"))
         self.d_spin = QSpinBox()
         self.d_spin.setRange(0, 2)
         self.d_spin.setValue(1)
         pdq_layout.addWidget(self.d_spin)
-        
-        # q parameter
+    
         pdq_layout.addWidget(QLabel("q:"))
         self.q_spin = QSpinBox()
         self.q_spin.setRange(0, 3)
         self.q_spin.setValue(1)
         pdq_layout.addWidget(self.q_spin)
-        
-        layout.addLayout(pdq_layout)
-        
+    
+        model_layout.addLayout(pdq_layout)
+    
         # Сезонные параметры P, D, Q, s
         seasonal_layout = QHBoxLayout()
-        
+    
         seasonal_layout.addWidget(QLabel("P:"))
         self.P_spin = QSpinBox()
         self.P_spin.setRange(0, 2)
         self.P_spin.setValue(1)
         seasonal_layout.addWidget(self.P_spin)
-        
+    
         seasonal_layout.addWidget(QLabel("D:"))
         self.D_spin = QSpinBox()
-        self.D_spin.setRange(0, 2)
+        self.D_spin.setRange(0, 1)
         self.D_spin.setValue(1)
         seasonal_layout.addWidget(self.D_spin)
-        
+    
         seasonal_layout.addWidget(QLabel("Q:"))
         self.Q_spin = QSpinBox()
         self.Q_spin.setRange(0, 2)
         self.Q_spin.setValue(1)
         seasonal_layout.addWidget(self.Q_spin)
-        
+    
         seasonal_layout.addWidget(QLabel("s:"))
         self.s_spin = QSpinBox()
         self.s_spin.setRange(1, 24)
-        self.s_spin.setValue(12)
+        self.s_spin.setValue(7)
         seasonal_layout.addWidget(self.s_spin)
-        
-        layout.addLayout(seasonal_layout)
-        
-        return group
-
-    def create_training_group(self) -> QGroupBox:
-        """
-        Создание группы элементов для обучения модели.
-        
-        Returns:
-            QGroupBox: Группа элементов обучения
-        """
-        group = QGroupBox("Обучение и оценка")
-        layout = QVBoxLayout(group)
-        
+    
+        model_layout.addLayout(seasonal_layout)
+        model_group.setLayout(model_layout)
+    
+        # 4. Группа кнопок управления
+        control_group = QGroupBox("Управление")
+        control_layout = QVBoxLayout()
+    
+        # Кнопка обучения
         self.train_btn = QPushButton("Обучить модель")
         self.train_btn.clicked.connect(self.train_model)
         self.train_btn.setEnabled(False)
-        layout.addWidget(self.train_btn)
-        
+        control_layout.addWidget(self.train_btn)
+    
+        # Кнопка подбора параметров
         self.tune_btn = QPushButton("Подобрать параметры")
         self.tune_btn.clicked.connect(self.tune_parameters)
         self.tune_btn.setEnabled(False)
-        layout.addWidget(self.tune_btn)
-        
+        control_layout.addWidget(self.tune_btn)
+    
+        # Кнопка сохранения
         self.save_btn = QPushButton("Сохранить модель")
         self.save_btn.clicked.connect(self.save_model)
         self.save_btn.setEnabled(False)
-        layout.addWidget(self.save_btn)
-        
-        return group
+        control_layout.addWidget(self.save_btn)
+    
+        control_group.setLayout(control_layout)
+    
+        # Прогресс-бар
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+    
+        # Добавляем все группы в основной layout
+        layout.addWidget(data_group)
+        layout.addWidget(analysis_group)
+        layout.addWidget(model_group)
+        layout.addWidget(control_group)
+        layout.addWidget(self.progress_bar)
+        layout.addStretch()
+    
+        panel.setLayout(layout)
+        return panel
 
     def create_right_panel(self) -> QFrame:
-        """Создание правой панели для отображения результатов."""
+        """Создание правой панели визуализации."""
         panel = QFrame()
         panel.setFrameStyle(QFrame.Shape.StyledPanel)
-        layout = QVBoxLayout(panel)
-    
+        layout = QVBoxLayout()
+        
         # Информационная метка
         self.info_label = QLabel("Загрузите данные для начала работы")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_label.setFont(QFont("Arial", 12))
         layout.addWidget(self.info_label)
-    
-        # Таблица для отображения результатов
+        
+        # Таблица результатов
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(2)
-        self.results_table.setHorizontalHeaderLabels(["Параметр", "Значение"])
+        self.results_table.setHorizontalHeaderLabels(["Метрика", "Значение"])
         self.results_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.results_table)
-    
-        # Область для графиков
+        
+        # Область для графика
         self.plot_frame = QFrame()
-        self.plot_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        self.plot_frame.setMinimumHeight(400)
+        self.plot_frame.setLayout(QVBoxLayout())
         layout.addWidget(self.plot_frame)
-    
+        
+        panel.setLayout(layout)
         return panel
 
-    def update_results_table(self, results: Dict[str, Any]) -> None:
-        """Обновление таблицы результатов."""
-        self.results_table.setRowCount(0)
-        for param, value in results.items():
-            row = self.results_table.rowCount()
-            self.results_table.insertRow(row)
-            self.results_table.setItem(row, 0, QTableWidgetItem(str(param)))
-            self.results_table.setItem(row, 1, QTableWidgetItem(str(value)))
-
-    def load_data(self, df: pd.DataFrame, filename: Optional[str] = None) -> None:
+  
+    def load_data(self, df: pd.DataFrame) -> None:
         """
         Загрузка данных для анализа.
     
         Args:
             df: DataFrame с данными
-            filename: Имя файла (опционально)
         """
         try:
+            # Проверяем наличие необходимых столбцов
+            required_columns = ['date', 'temperature_day']
+            if not all(col in df.columns for col in required_columns):
+                raise ValueError("В данных отсутствуют необходимые столбцы: date, temperature_day")
+        
+            # Создаем копию данных
             self.df = df.copy()
+        
+            # Проверяем формат даты
+            self.df['date'] = pd.to_datetime(self.df['date'])
+        
+            # Активируем кнопку подготовки данных
             self.prepare_btn.setEnabled(True)
-            self.info_label.setText("Данные загружены. Нажмите 'Подготовить данные' для начала анализа")
-            self.logger.info("Данные загружены успешно")
-            
+        
+            # Обновляем информацию
+            self.info_label.setText(
+                "Данные загружены успешно\n"
+                "Выполните подготовку данных для обучения модели"
+            )
+        
+            self.logger.info(
+                f"Загружены данные: {len(self.df)} строк, "
+                f"период: с {self.df['date'].min().date()} по {self.df['date'].max().date()}"
+            )
+        
         except Exception as e:
             self.logger.error(f"Ошибка при загрузке данных: {str(e)}")
             QMessageBox.critical(self, "Ошибка", f"Ошибка при загрузке данных: {str(e)}")
 
+
     def prepare_data(self) -> None:
-        """Подготовка данных для анализа."""
+        """Подготовка данных для обучения."""
         try:
-            if not self.df is None:
-                # Преобразование даты и установка частоты
-                df = self.df.copy()
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                df = df.asfreq('D')  # Установка дневной частоты
+            if self.df is None:
+                raise ValueError("Данные не загружены")
             
-                # Обработка пропущенных значений
-                if df['temperature_day'].isnull().any():
-                    df['temperature_day'].interpolate(method='time', inplace=True)
+            # Получаем размер тестовой выборки
+            test_size = self.test_size_spin.value() / 100
             
-                self.prepared_data = df
-                self.split_btn.setEnabled(True)
+            # Разделяем данные
+            split_idx = int(len(self.df) * (1 - test_size))
             
-                # Обновляем таблицу результатов
-                results = {
-                    'Количество записей': len(df),
-                    'Период данных': f"с {df.index.min().date()} по {df.index.max().date()}",
-                    'Пропущенные значения': df.isnull().sum().to_dict()
-                }
-                self.update_results_table(results)
+            self.train_data = {
+                'temperature_day': self.df['temperature_day'][:split_idx]
+            }
             
-                self.info_label.setText("Данные подготовлены успешно")
-                self.logger.info("Данные подготовлены")
+            self.test_data = {
+                'temperature_day': self.df['temperature_day'][split_idx:]
+            }
+            
+            # Обновляем интерфейс
+            self.train_btn.setEnabled(True)
+            self.analyze_btn.setEnabled(True)
+            self.tune_btn.setEnabled(True)
+            self.info_label.setText(
+                f"Данные подготовлены:\n"
+                f"Размер обучающей выборки: {len(self.train_data['temperature_day'])}\n"
+                f"Размер тестовой выборки: {len(self.test_data['temperature_day'])}"
+            )
+            
+            self.logger.info("Данные успешно подготовлены для обучения")
             
         except Exception as e:
             self.logger.error(f"Ошибка при подготовке данных: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка при подготовке данных: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", str(e))
 
-    def split_data(self) -> None:
-        """Разделение данных на обучающую и тестовую выборки."""
+    def analyze_time_series(self) -> None:
+        """Анализ временного ряда перед обучением."""
         try:
-            test_size = self.test_size_spin.value() / 100
-            split_idx = int(len(self.prepared_data) * (1 - test_size))
+            if self.train_data is None:
+                raise ValueError("Данные не подготовлены")
+            
+            self.progress_bar.setVisible(True)
+            self.info_label.setText("Выполняется анализ временного ряда...")
+
+            # Вывод отладочной информации
+            print("Информация о train_data:")
+            print(f"Тип train_data: {type(self.train_data)}")
+            print(f"Содержимое train_data: {self.train_data}")
+            print(f"Ключи train_data: {self.train_data.keys() if isinstance(self.train_data, dict) else 'не словарь'}")
         
-            self.train_data = self.prepared_data.iloc[:split_idx].copy()
-            self.test_data = self.prepared_data.iloc[split_idx:].copy()
+            # Получаем данные температуры
+            temperature_data = self.train_data['temperature_day']
+            print(f"\nИнформация о температурных данных:")
+            print(f"Тип данных: {type(temperature_data)}")
+            print(f"Количество значений: {len(temperature_data)}")
+            print(f"Количество NaN: {pd.isna(temperature_data).sum()}")
+            print(f"Первые несколько значений: {temperature_data[:5]}")
         
-            # Обновляем таблицу результатов
-            results = {
-                'Размер обучающей выборки': len(self.train_data),
-                'Размер тестовой выборки': len(self.test_data),
-                'Период обучающей выборки': f"с {self.train_data.index.min().date()} по {self.train_data.index.max().date()}",
-                'Период тестовой выборки': f"с {self.test_data.index.min().date()} по {self.test_data.index.max().date()}"
-            }
-            self.update_results_table(results)
+            # Преобразуем в Series с индексом
+            temperature_series = pd.Series(temperature_data)
         
-            self.train_btn.setEnabled(True)
-            self.tune_btn.setEnabled(True)
+            # Проверяем, есть ли данные
+            if len(temperature_series.dropna()) < 2:
+                raise ValueError(f"Недостаточно данных для анализа. Найдено значений: {len(temperature_series.dropna())}")
+            
+            # Анализируем временной ряд
+            analysis_results = self.model.analyze_time_series(temperature_series)
         
-            self.info_label.setText("Данные успешно разделены")
-            self.logger.info("Данные разделены на выборки")
-        
+            if analysis_results and 'error' not in analysis_results:
+                msg = "Результаты анализа временного ряда:\n\n"
+            
+                # Добавляем базовую статистику
+                if 'statistics' in analysis_results:
+                    stats = analysis_results['statistics']
+                    msg += "Общая статистика:\n"
+                    msg += f"Количество наблюдений: {stats['n_observations']}\n"
+                    msg += f"Среднее значение: {stats['mean']:.2f}\n"
+                    msg += f"Стандартное отклонение: {stats['std']:.2f}\n"
+                    msg += f"Минимум: {stats['min']:.2f}\n"
+                    msg += f"Максимум: {stats['max']:.2f}\n\n"
+            
+                if 'stationarity' in analysis_results:
+                    stationarity = analysis_results['stationarity']
+                    msg += "Стационарность:\n"
+                    if 'error' not in stationarity:
+                        msg += f"- Тест-статистика: {stationarity['test_statistic']:.4f}\n"
+                        msg += f"- p-значение: {stationarity['p_value']:.4f}\n"
+                        msg += f"- Ряд {'стационарен' if stationarity['is_stationary'] else 'не стационарен'}\n"
+                    else:
+                        msg += f"- {stationarity['error']}\n"
+                    msg += "\n"
+            
+                if 'autocorrelation' in analysis_results:
+                    autocorr = analysis_results['autocorrelation']
+                    msg += "Автокорреляция:\n"
+                    if 'error' not in autocorr:
+                        msg += f"- Найдено {len(autocorr['significant_lags'])} значимых лагов\n"
+                    else:
+                        msg += f"- {autocorr['error']}\n"
+            
+                if 'report_file' in analysis_results:
+                    msg += f"\nПодробный отчет сохранен в:\n{analysis_results['report_file']}"
+            
+                # Показываем сообщение
+                QMessageBox.information(self, "Анализ временного ряда", msg)
+            
+                # Обновляем информацию на интерфейсе
+                self.info_label.setText(
+                    "Анализ временного ряда завершен\n"
+                    f"Отчет сохранен в: {analysis_results.get('report_file', 'unknown')}"
+                )
+            
+            else:
+                error_msg = analysis_results.get('error', 'Неизвестная ошибка при анализе')
+                raise ValueError(error_msg)
+            
         except Exception as e:
-            self.logger.error(f"Ошибка при разделении данных: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка при разделении данных: {str(e)}")
+            self.logger.error(f"Ошибка при анализе временного ряда: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", str(e))
+        
+        finally:
+            self.progress_bar.setVisible(False)
 
     def train_model(self) -> None:
-        """Обучение модели с текущими параметрами."""
+        """Обучение модели и анализ результатов."""
         try:
-            # Получение параметров
-            order = (
-                self.p_spin.value(),
-                self.d_spin.value(),
-                self.q_spin.value()
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(5)
+        
+            # Анализируем временной ряд перед обучением
+            self.info_label.setText("Анализ временного ряда...")
+            analysis_results = self.model.analyze_time_series(
+                self.train_data['temperature_day']
             )
-            seasonal_order = (
-                self.P_spin.value(),
-                self.D_spin.value(),
-                self.Q_spin.value(),
-                self.s_spin.value()
-            )
+        
+            self.progress_bar.setValue(20)
+        
+            if analysis_results:
+                # Используем стационарные данные если они есть
+                if 'stationary_data' in analysis_results:
+                    train_data = analysis_results['stationary_data']
+                else:
+                    train_data = self.train_data['temperature_day']
             
-            # Обучение модели
-            result = self.model.train(self.train_data, order, seasonal_order)
+                # Получаем параметры
+                order = (self.p_spin.value(), self.d_spin.value(), self.q_spin.value())
+                seasonal_order = (
+                    self.P_spin.value(),
+                    self.D_spin.value(),
+                    self.Q_spin.value(),
+                    self.s_spin.value()
+                )
             
-            if result['status'] == 'success':
-                # Получение прогноза
-                predictions = self.model.predict(len(self.test_data))
-                if predictions is not None:
-                    self.current_predictions = predictions
+                # Обучаем модель
+                result = self.model.train(train_data, order, seasonal_order)
+            
+                self.progress_bar.setValue(40)
+            
+                if result['status'] == 'success':
+                    # Делаем прогноз
+                    predictions = self.model.predict(len(self.test_data['temperature_day']))
+                
+                    if predictions is not None:
+                        self.progress_bar.setValue(60)
                     
-                    # Оценка качества
-                    metrics = self.model.evaluate_model(self.test_data, predictions)
+                        # Проводим подробный анализ прогноза
+                        analysis_results = self.model.analyze_forecast(
+                            self.test_data['temperature_day'].values,
+                            predictions,
+                            self.test_data['temperature_day'].index
+                        )
                     
-                    # Визуализация результатов
-                    fig = self.visualizer.plot_forecast(
-                        self.test_data['temperature_day'],
-                        predictions,
-                        self.test_data.index
-                    )
+                        # Сохраняем отчет
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        report_file = f'results/forecast_report_{timestamp}.txt'
+                        os.makedirs('results', exist_ok=True)
+                        self.model.save_forecast_report(analysis_results, report_file)
                     
-                    # Обновление интерфейса
-                    self.update_plot(fig)
-                    self.save_btn.setEnabled(True)
-                    self.info_label.setText(
-                        f"Модель обучена:\n"
-                        f"MSE: {metrics['mse']:.4f}\n"
-                        f"R2: {metrics['r2']:.4f}\n"
-                        f"MAE: {metrics['mae']:.4f}"
-                    )
+                        self.progress_bar.setValue(80)
                     
-                    self.logger.info("Модель успешно обучена")
+                        # Обновляем таблицу результатов
+                        self.update_results_table(analysis_results['metrics'])
                     
+                        # Строим график
+                        self.plot_forecast_analysis(
+                            self.test_data['temperature_day'],
+                            predictions,
+                            analysis_results
+                        )
+                    
+                        # Обновляем информацию
+                        self.info_label.setText(
+                            f"Модель обучена успешно\n"
+                            f"MSE: {analysis_results['metrics']['mse']:.4f}\n"
+                            f"RMSE: {analysis_results['metrics']['rmse']:.4f}\n"
+                            f"MAPE: {analysis_results['metrics']['mape']:.2f}%\n"
+                            f"Отчет сохранен в: {report_file}"
+                        )
+                    
+                        # Активируем кнопку сохранения
+                        self.save_btn.setEnabled(True)
+                    
+                    self.progress_bar.setValue(100)
+                else:
+                    raise ValueError(result['message'])
+            
         except Exception as e:
             self.logger.error(f"Ошибка при обучении модели: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Ошибка при обучении модели: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", str(e))
+        finally:
+            self.progress_bar.setVisible(False)
 
+    def plot_forecast_analysis(self, actual: pd.Series, predicted: np.ndarray, analysis_results: Dict) -> None:
+        """
+        Построение расширенного графика анализа прогноза.
+    
+        Args:
+            actual: Фактические значения
+            predicted: Прогнозные значения
+            analysis_results: Результаты анализа
+        """
+        try:
+            # Очищаем предыдущий график
+            for i in reversed(range(self.plot_frame.layout().count())): 
+                self.plot_frame.layout().itemAt(i).widget().deleteLater()
+        
+            # Создаем фигуру с двумя графиками
+            fig = Figure(figsize=(10, 8))
+        
+            # График прогноза
+            ax1 = fig.add_subplot(211)
+            ax1.plot(actual.index, actual.values, 
+                    label='Фактические значения', color='blue')
+            ax1.plot(actual.index, predicted, 
+                    label='Прогноз', color='red', linestyle='--')
+            ax1.set_title('Сравнение прогноза с фактическими значениями')
+            ax1.set_xlabel('Дата')
+            ax1.set_ylabel('Температура (°C)')
+            ax1.legend()
+            ax1.grid(True)
+        
+            # График ошибок
+            ax2 = fig.add_subplot(212)
+            errors = actual.values - predicted
+            ax2.plot(actual.index, errors, color='green', marker='o')
+            ax2.axhline(y=0, color='r', linestyle='--')
+            ax2.set_title('Ошибки прогноза')
+            ax2.set_xlabel('Дата')
+            ax2.set_ylabel('Ошибка (°C)')
+            ax2.grid(True)
+        
+            # Добавляем аннотации с метриками
+            metrics_text = (
+                f"MSE: {analysis_results['metrics']['mse']:.4f}\n"
+                f"RMSE: {analysis_results['metrics']['rmse']:.4f}\n"
+                f"MAPE: {analysis_results['metrics']['mape']:.2f}%"
+            )
+            fig.text(0.02, 0.02, metrics_text, fontsize=8)
+        
+            # Поворачиваем подписи дат
+            fig.autofmt_xdate()
+        
+            # Добавляем график на форму
+            canvas = FigureCanvas(fig)
+            self.plot_frame.layout().addWidget(canvas)
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка при построении графика: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def update_results_table(self, metrics: Dict[str, float]) -> None:
+        """Обновление таблицы результатов."""
+        self.results_table.setRowCount(0)
+        for name, value in metrics.items():
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            self.results_table.setItem(row, 0, QTableWidgetItem(name))
+        
+            # Проверяем значение метрики
+            if np.isnan(value):
+                value_str = "Не удалось рассчитать"
+            elif name == 'mape':
+                value_str = f"{value:.2f}%" if not np.isinf(value) else "Не удалось рассчитать"
+            else:
+                value_str = f"{value:.4f}"
+            
+            self.results_table.setItem(row, 1, QTableWidgetItem(value_str))
+
+ 
     def tune_parameters(self) -> None:
         """Подбор оптимальных параметров модели."""
         try:
             self.progress_bar.setVisible(True)
+            self.info_label.setText("Выполняется подбор параметров...")
+        
+            parameter_combinations = [
+                # (p, d, q, P, D, Q, s)
+                (0, 1, 1, 0, 1, 1, 7),  # Комбинация 1
+                (1, 1, 1, 1, 1, 1, 7),  # Комбинация 2
+                (2, 1, 2, 0, 1, 1, 7),  # Комбинация 3
+                (1, 1, 2, 1, 1, 1, 12), # Комбинация 4
+                (2, 1, 2, 1, 1, 1, 12)  # Комбинация 5
+            ]
+        
+            results = []
+            best_rmse = float('inf')
+            best_params = None
+        
+            total_combinations = len(parameter_combinations)
+        
+            for i, params in enumerate(parameter_combinations):
+                try:
+                    # Распаковываем параметры
+                    p, d, q, P, D, Q, s = params
+                    order = (p, d, q)
+                    seasonal_order = (P, D, Q, s)
+                
+                    # Обучаем модель
+                    result = self.model.train(
+                        self.train_data['temperature_day'],
+                        order,
+                        seasonal_order
+                    )
+                
+                    if result['status'] == 'success':
+                        # Делаем прогноз
+                        predictions = self.model.predict(len(self.test_data['temperature_day']))
+                    
+                        if predictions is not None:
+                            # Оцениваем качество
+                            metrics = self.model.evaluate(
+                                self.test_data['temperature_day'].values,
+                                predictions
+                            )
+                        
+                            results.append({
+                                'parameters': {
+                                    'order': order,
+                                    'seasonal_order': seasonal_order
+                                },
+                                'metrics': metrics
+                            })
+                        
+                            # Проверяем, лучше ли текущий результат
+                            if metrics['rmse'] < best_rmse:
+                                best_rmse = metrics['rmse']
+                                best_params = params
+                
+                    # Обновляем прогресс
+                    progress = int((i + 1) / total_combinations * 100)
+                    self.progress_bar.setValue(progress)
+                
+                except Exception as e:
+                    self.logger.warning(f"Ошибка для комбинации {params}: {str(e)}")
+                    continue
+        
+            # Сохраняем результаты
+            self.save_tuning_results(results, best_params)
+        
+            # Устанавливаем лучшие параметры
+            if best_params:
+                p, d, q, P, D, Q, s = best_params
+                self.p_spin.setValue(p)
+                self.d_spin.setValue(d)
+                self.q_spin.setValue(q)
+                self.P_spin.setValue(P)
+                self.D_spin.setValue(D)
+                self.Q_spin.setValue(Q)
+                self.s_spin.setValue(s)
             
-            # Подбор параметров
-            results = self.model.tune_parameters(self.train_data, self.test_data)
-            
-            if results['best_result']:
-                # Обновление параметров в интерфейсе
-                order = results['best_result']['order']
-                seasonal_order = results['best_result']['seasonal_order']
-                
-                self.p_spin.setValue(order[0])
-                self.d_spin.setValue(order[1])
-                self.q_spin.setValue(order[2])
-                self.P_spin.setValue(seasonal_order[0])
-                self.D_spin.setValue(seasonal_order[1])
-                self.Q_spin.setValue(seasonal_order[2])
-                self.s_spin.setValue(seasonal_order[3])
-                
-                # Визуализация результатов
-                fig = self.visualizer.create_results_dashboard(results['best_result'])
-                self.update_plot(fig)
-                
-                # Создание отчета о влиянии параметров
-                self.create_parameter_analysis(results['all_results'])
-                
-                self.info_label.setText(
-                    f"Найдены оптимальные параметры:\n"
-                    f"Order: {order}\n"
-                    f"Seasonal Order: {seasonal_order}\n"
-                    f"MSE: {results['best_result']['mse']:.4f}"
-                )
-                
-                self.logger.info("Подбор параметров завершен успешно")
-                
-            else:
-                QMessageBox.warning(
+                QMessageBox.information(
                     self,
-                    "Предупреждение",
-                    "Не удалось найти оптимальные параметры"
+                    "Подбор параметров",
+                    f"Найдены оптимальные параметры:\n"
+                    f"order=({p},{d},{q})\n"
+                    f"seasonal_order=({P},{D},{Q},{s})\n"
+                    f"RMSE={best_rmse:.4f}"
                 )
-                
-            self.progress_bar.setVisible(False)
-            
+        
+            self.info_label.setText("Подбор параметров завершен")
+        
         except Exception as e:
             self.logger.error(f"Ошибка при подборе параметров: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Ошибка",
-                f"Ошибка при подборе параметров: {str(e)}"
-            )
+            QMessageBox.critical(self, "Ошибка", str(e))
+        
+        finally:
             self.progress_bar.setVisible(False)
 
-    def create_parameter_analysis(self, results: List[Dict]) -> None:
+    def save_tuning_results(self, results: List[Dict], best_params: Tuple) -> None:
         """
-        Создание анализа влияния параметров.
-        
+        Сохранение результатов подбора параметров.
+    
         Args:
-            results: Список результатов с разными параметрами
+            results: Список результатов для всех комбинаций
+            best_params: Лучшие найденные параметры
         """
         try:
-            # Создание графиков для каждого параметра
-            parameters = ['p', 'd', 'q', 'P', 'D', 'Q']
-            for param in parameters:
-                fig = self.visualizer.plot_parameter_influence(results, param)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f'results/parameter_tuning_{timestamp}.txt'
+        
+            if not os.path.exists('results'):
+                os.makedirs('results')
+        
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("Результаты подбора параметров SARIMA\n")
+                f.write("=" * 50 + "\n\n")
+            
+                # Лучшие параметры
+                f.write("Лучшие параметры:\n")
+                f.write("-" * 20 + "\n")
+                p, d, q, P, D, Q, s = best_params
+                f.write(f"order (p,d,q): ({p},{d},{q})\n")
+                f.write(f"seasonal_order (P,D,Q,s): ({P},{D},{Q},{s})\n\n")
+            
+                # Результаты всех комбинаций
+                f.write("Все проверенные комбинации:\n")
+                f.write("-" * 20 + "\n")
+            
+                for result in results:
+                    params = result['parameters']
+                    metrics = result['metrics']
                 
-                # Сохранение графика
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f'parameter_analysis_{param}_{timestamp}.png'
-                fig.savefig(os.path.join('plots', filename))
+                    f.write("\nПараметры:\n")
+                    f.write(f"order: {params['order']}\n")
+                    f.write(f"seasonal_order: {params['seasonal_order']}\n")
+                    f.write("Метрики:\n")
+                    for metric_name, metric_value in metrics.items():
+                        f.write(f"{metric_name}: {metric_value:.4f}\n")
+                    f.write("-" * 20 + "\n")
             
-            self.logger.info("Создан анализ влияния параметров")
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка при создании анализа параметров: {str(e)}")
-
-    def update_plot(self, fig) -> None:
-        """
-        Обновление области с графиком.
+                f.write(f"\nДата создания отчета: {timestamp}")
         
-        Args:
-            fig: Объект графика matplotlib
-        """
+            self.logger.info(f"Результаты подбора параметров сохранены в {filename}")
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка при сохранении результатов: {str(e)}")
+
+    def update_info_label(self, analysis_results: Dict) -> None:
+        """Обновление информационной метки."""
+        metrics = analysis_results['metrics']
+        info_text = "Модель обучена успешно\n"
+    
+        if not np.isnan(metrics['mse']):
+            info_text += f"MSE: {metrics['mse']:.4f}\n"
+        if not np.isnan(metrics['rmse']):
+            info_text += f"RMSE: {metrics['rmse']:.4f}\n"
+        if not np.isnan(metrics['mape']):
+            info_text += f"MAPE: {metrics['mape']:.2f}%\n"
+        else:
+            info_text += "MAPE: Не удалось рассчитать\n"
+        
+        self.info_label.setText(info_text)
+
+
+    def plot_results(self, actual: pd.Series, predicted: np.ndarray) -> None:
+        """Построение графика результатов."""
         try:
-            # Очистка предыдущего графика
+            # Очищаем предыдущий график
             for i in reversed(range(self.plot_frame.layout().count())): 
                 self.plot_frame.layout().itemAt(i).widget().deleteLater()
             
-            # Создание нового canvas
-            canvas = FigureCanvas(fig)
+            # Создаем новый график
+            fig = Figure(figsize=(8, 6))
+            ax = fig.add_subplot(111)
             
-            # Добавление canvas в layout
-            if not self.plot_frame.layout():
-                self.plot_frame.setLayout(QVBoxLayout())
+            # Строим графики
+            ax.plot(actual.index, actual.values, 
+                   label='Фактические значения', color='blue')
+            ax.plot(actual.index, predicted, 
+                   label='Прогноз', color='red', linestyle='--')
+            
+            ax.set_title('Сравнение прогноза с фактическими значениями')
+            ax.set_xlabel('Дата')
+            ax.set_ylabel('Температура')
+            ax.legend()
+            ax.grid(True)
+            
+            # Поворачиваем подписи дат
+            fig.autofmt_xdate()
+            
+            # Добавляем график на форму
+            canvas = FigureCanvas(fig)
             self.plot_frame.layout().addWidget(canvas)
             
         except Exception as e:
-            self.logger.error(f"Ошибка при обновлении графика: {str(e)}")
+            self.logger.error(f"Ошибка при построении графика: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", str(e))
 
     def save_model(self) -> None:
-        """Сохранение текущей модели."""
-        try:
-            # Получение пути для сохранения
-            filename, _ = QFileDialog.getSaveFileName(
-                self,
-                "Сохранить модель",
-                "",
-                "Model Files (*.pkl)"
-            )
-            
-            if filename:
-                # Подготовка метаданных
-                metadata = {
-                    'order': (
-                        self.p_spin.value(),
-                        self.d_spin.value(),
-                        self.q_spin.value()
-                    ),
-                    'seasonal_order': (
-                        self.P_spin.value(),
-                        self.D_spin.value(),
-                        self.Q_spin.value(),
-                        self.s_spin.value()
-                    ),
-                    'train_size': len(self.train_data),
-                    'test_size': len(self.test_data),
-                    'saved_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                
-                # Сохранение модели
-                if self.data_handler.save_model(self.model, filename, metadata):
-                    QMessageBox.information(
-                        self,
-                        "Успех",
-                        "Модель успешно сохранена"
-                    )
-                    self.logger.info(f"Модель сохранена в {filename}")
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Предупреждение",
-                        "Не удалось сохранить модель"
-                    )
-                    
-        except Exception as e:
-            self.logger.error(f"Ошибка при сохранении модели: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Ошибка",
-                f"Ошибка при сохранении модели: {str(e)}"
-            )
-
-    def closeEvent(self, event) -> None:
-        """
-        Обработка закрытия вкладки.
-        
-        Args:
-            event: Событие закрытия
-        """
-        try:
-            # Сохранение результатов если есть
-            if hasattr(self, 'model') and self.model is not None:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.data_handler.save_results(
-                    {
-                        'order': (
-                            self.p_spin.value(),
-                            self.d_spin.value(),
-                            self.q_spin.value()
-                        ),
-                        'seasonal_order': (
-                            self.P_spin.value(),
-                            self.D_spin.value(),
-                            self.Q_spin.value(),
-                            self.s_spin.value()
-                        ),
-                        'metrics': self.model.evaluate_model(
-                            self.test_data,
-                            self.current_predictions
-                        ) if self.current_predictions is not None else None
-                    },
-                    f'final_results_{timestamp}'
-                )
-            
-            self.logger.info("Вкладка закрыта")
-            event.accept()
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка при закрытии вкладки: {str(e)}")
-            event.accept()
-
-
+       """Сохранение обученной модели."""
+       try:
+           # Создаем директорию если её нет
+           if not os.path.exists('models'):
+               os.makedirs('models')
+           
+           # Генерируем имя файла
+           timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+           filename = os.path.join('models', f'sarima_model_{timestamp}.txt')
+           
+           # Собираем информацию о модели
+           model_info = {
+               'parameters': {
+                   'order': (
+                       self.p_spin.value(),
+                       self.d_spin.value(),
+                       self.q_spin.value()
+                   ),
+                   'seasonal_order': (
+                       self.P_spin.value(),
+                       self.D_spin.value(),
+                       self.Q_spin.value(),
+                       self.s_spin.value()
+                   )
+               },
+               'training_data': {
+                   'train_size': len(self.train_data['temperature_day']),
+                   'test_size': len(self.test_data['temperature_day']),
+               }
+           }
+           
+           # Получаем прогноз и метрики для сохранения
+           predictions = self.model.predict(len(self.test_data['temperature_day']))
+           metrics = self.model.evaluate(
+               self.test_data['temperature_day'].values,
+               predictions
+           )
+           
+           # Сохраняем всю информацию в файл
+           with open(filename, 'w', encoding='utf-8') as f:
+               f.write("Отчет о модели SARIMA\n")
+               f.write("=" * 50 + "\n\n")
+               
+               # Параметры модели
+               f.write("Параметры модели:\n")
+               f.write("-" * 20 + "\n")
+               f.write(f"order (p,d,q): {model_info['parameters']['order']}\n")
+               f.write(f"seasonal_order (P,D,Q,s): {model_info['parameters']['seasonal_order']}\n\n")
+               
+               # Информация о данных
+               f.write("Информация о данных:\n")
+               f.write("-" * 20 + "\n")
+               f.write(f"Размер обучающей выборки: {model_info['training_data']['train_size']}\n")
+               f.write(f"Размер тестовой выборки: {model_info['training_data']['test_size']}\n\n")
+               
+               # Метрики качества
+               f.write("Метрики качества:\n")
+               f.write("-" * 20 + "\n")
+               for metric, value in metrics.items():
+                   f.write(f"{metric}: {value:.4f}\n")
+               
+               f.write(f"\nМодель сохранена: {timestamp}")
+           
+           QMessageBox.information(
+               self,
+               "Сохранение модели",
+               f"Модель успешно сохранена в файл:\n{filename}"
+           )
+           
+           self.logger.info(f"Модель сохранена в {filename}")
+           
+       except Exception as e:
+           self.logger.error(f"Ошибка при сохранении модели: {str(e)}")
+           QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении модели: {str(e)}")

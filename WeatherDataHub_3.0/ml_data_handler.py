@@ -1,18 +1,16 @@
 import pandas as pd
 import numpy as np
-from typing import Tuple, Optional, Dict, List
-import pickle
-import json
+from typing import Tuple, Optional, Dict
 import os
 from datetime import datetime
 import logging
 
 class DataHandler:
     """
-    Класс для обработки и управления данными для машинного обучения.
+    Класс для обработки данных погоды и подготовки их к прогнозированию.
     
     Attributes:
-        logger: Логгер для записи операций с данными
+        logger: Логгер для записи операций
     """
     
     def __init__(self):
@@ -24,7 +22,13 @@ class DataHandler:
         """Настройка системы логирования."""
         self.logger = logging.getLogger('DataHandler')
         self.logger.setLevel(logging.INFO)
-        handler = logging.FileHandler('data_handler.log')
+        
+        # Создаем директорию для логов если её нет
+        os.makedirs('logs', exist_ok=True)
+        
+        handler = logging.FileHandler(
+            f'logs/data_handler_{datetime.now().strftime("%Y%m%d")}.log'
+        )
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
@@ -32,42 +36,48 @@ class DataHandler:
         self.logger.addHandler(handler)
 
     def setup_directories(self) -> None:
-        """Создание необходимых директорий для хранения данных."""
-        directories = ['models', 'results', 'data']
+        """Создание необходимых директорий."""
+        directories = ['models', 'results', 'temp_data']
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
 
     def validate_data(self, df: pd.DataFrame) -> bool:
         """
-        Проверка корректности данных.
+        Проверка корректности данных погоды.
         
         Args:
             df: DataFrame для проверки
             
         Returns:
-            bool: True если данные корректны, False иначе
+            bool: True если данные корректны
         """
         try:
-            required_columns = {'date', 'temperature_day'}
+            # Проверяем наличие необходимых столбцов
+            required_columns = {
+                'date', 'temperature_day', 'temperature_evening',
+                'pressure_day', 'pressure_evening'
+            }
             
-            # Проверка наличия необходимых столбцов
             if not required_columns.issubset(df.columns):
                 missing = required_columns - set(df.columns)
                 self.logger.error(f"Отсутствуют столбцы: {missing}")
                 return False
             
-            # Проверка типов данных
-            if not pd.api.types.is_datetime64_any_dtype(df['date']):
-                try:
-                    pd.to_datetime(df['date'])
-                except:
-                    self.logger.error("Некорректный формат даты")
+            # Проверяем формат даты
+            try:
+                pd.to_datetime(df['date'])
+            except:
+                self.logger.error("Некорректный формат даты")
+                return False
+            
+            # Проверяем типы данных температуры
+            numeric_columns = ['temperature_day', 'temperature_evening', 
+                             'pressure_day', 'pressure_evening']
+            for col in numeric_columns:
+                if not pd.to_numeric(df[col], errors='coerce').notnull().all():
+                    self.logger.error(f"Некорректные значения в столбце {col}")
                     return False
             
-            # Проверка на пропущенные значения
-            if df['temperature_day'].isnull().any():
-                self.logger.warning("Обнаружены пропущенные значения температуры")
-                
             return True
             
         except Exception as e:
@@ -86,6 +96,8 @@ class DataHandler:
         """
         try:
             self.logger.info("Начало подготовки данных")
+            
+            # Создаем копию данных
             prepared_df = df.copy()
             
             # Преобразование даты
@@ -95,12 +107,21 @@ class DataHandler:
             # Сортировка по дате
             prepared_df.sort_index(inplace=True)
             
-            # Обработка пропущенных значений
-            if prepared_df['temperature_day'].isnull().any():
-                prepared_df['temperature_day'].fillna(
-                    prepared_df['temperature_day'].mean(),
-                    inplace=True
-                )
+            # Заполнение пропущенных значений
+            numeric_columns = ['temperature_day', 'temperature_evening', 
+                             'pressure_day', 'pressure_evening']
+            
+            for col in numeric_columns:
+                if prepared_df[col].isnull().any():
+                    # Используем линейную интерполяцию для временного ряда
+                    prepared_df[col] = prepared_df[col].interpolate(method='time')
+            
+            # Убедимся, что нет пропущенных значений в начале и конце
+            prepared_df = prepared_df.fillna(method='bfill').fillna(method='ffill')
+            
+            # Проверяем частоту данных
+            if not prepared_df.index.freq:
+                prepared_df = prepared_df.asfreq('D')
             
             self.logger.info("Данные успешно подготовлены")
             return prepared_df
@@ -109,26 +130,28 @@ class DataHandler:
             self.logger.error(f"Ошибка при подготовке данных: {str(e)}")
             raise
 
-    def split_data(self, df: pd.DataFrame, 
-                   test_size: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def split_data(self, df: pd.DataFrame, test_size: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Разделение данных на обучающую и тестовую выборки.
         
         Args:
-            df: Исходный DataFrame
-            test_size: Размер тестовой выборки (доля от общего размера)
+            df: DataFrame для разделения
+            test_size: Размер тестовой выборки
             
         Returns:
             Tuple[pd.DataFrame, pd.DataFrame]: Кортеж (train_data, test_data)
         """
         try:
+            # Вычисляем индекс разделения
             split_idx = int(len(df) * (1 - test_size))
+            
+            # Разделяем данные
             train_data = df.iloc[:split_idx].copy()
             test_data = df.iloc[split_idx:].copy()
             
             self.logger.info(
-                f"Данные разделены: {len(train_data)} записей для обучения, "
-                f"{len(test_data)} записей для тестирования"
+                f"Данные разделены: {len(train_data)} дней для обучения, "
+                f"{len(test_data)} дней для тестирования"
             )
             
             return train_data, test_data
@@ -137,96 +160,43 @@ class DataHandler:
             self.logger.error(f"Ошибка при разделении данных: {str(e)}")
             raise
 
-    def save_model(self, model: any, filename: str, metadata: Optional[Dict] = None) -> bool:
-        """
-        Сохранение модели и её метаданных.
-        
-        Args:
-            model: Модель для сохранения
-            filename: Имя файла
-            metadata: Дополнительные метаданные модели
-            
-        Returns:
-            bool: True если сохранение успешно, False иначе
-        """
-        try:
-            # Создаем полный путь
-            model_path = os.path.join('models', f"{filename}.pkl")
-            meta_path = os.path.join('models', f"{filename}_metadata.json")
-            
-            # Сохраняем модель
-            with open(model_path, 'wb') as f:
-                pickle.dump(model, f)
-            
-            # Сохраняем метаданные
-            if metadata:
-                metadata['saved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                with open(meta_path, 'w') as f:
-                    json.dump(metadata, f, indent=4)
-            
-            self.logger.info(f"Модель сохранена: {model_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка при сохранении модели: {str(e)}")
-            return False
-
-    def load_model(self, filename: str) -> Tuple[Optional[any], Optional[Dict]]:
-        """
-        Загрузка модели и её метаданных.
-        
-        Args:
-            filename: Имя файла
-            
-        Returns:
-            Tuple[Optional[any], Optional[Dict]]: Кортеж (модель, метаданные)
-        """
-        try:
-            model_path = os.path.join('models', f"{filename}.pkl")
-            meta_path = os.path.join('models', f"{filename}_metadata.json")
-            
-            # Загружаем модель
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            
-            # Загружаем метаданные
-            metadata = None
-            if os.path.exists(meta_path):
-                with open(meta_path, 'r') as f:
-                    metadata = json.load(f)
-            
-            self.logger.info(f"Модель загружена: {model_path}")
-            return model, metadata
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка при загрузке модели: {str(e)}")
-            return None, None
-
-    def save_results(self, results: Dict, filename: str) -> bool:
+    def save_results(self, results: Dict, model_params: Dict) -> str:
         """
         Сохранение результатов анализа.
         
         Args:
-            results: Словарь с результатами
-            filename: Имя файла
+            results: Метрики и результаты
+            model_params: Параметры модели
             
         Returns:
-            bool: True если сохранение успешно, False иначе
+            str: Путь к файлу с результатами
         """
         try:
-            # Добавляем временную метку
-            results['saved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f'results/sarima_results_{timestamp}.txt'
             
-            # Создаем полный путь
-            result_path = os.path.join('results', f"{filename}.json")
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("Результаты прогнозирования погоды (SARIMA)\n")
+                f.write("=" * 50 + "\n\n")
+                
+                # Параметры модели
+                f.write("Параметры модели:\n")
+                f.write("-" * 20 + "\n")
+                f.write(f"order (p,d,q): {model_params['order']}\n")
+                f.write(f"seasonal_order (P,D,Q,s): {model_params['seasonal_order']}\n\n")
+                
+                # Метрики качества
+                f.write("Метрики качества:\n")
+                f.write("-" * 20 + "\n")
+                for metric, value in results.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{metric}: {value:.4f}\n")
+                
+                f.write(f"\nДата создания: {timestamp}\n")
             
-            # Сохраняем результаты
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=4, ensure_ascii=False)
-            
-            self.logger.info(f"Результаты сохранены: {result_path}")
-            return True
+            self.logger.info(f"Результаты сохранены в {filename}")
+            return filename
             
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении результатов: {str(e)}")
-            return False
+            raise
