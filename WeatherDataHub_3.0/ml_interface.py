@@ -2,9 +2,10 @@ from typing import Optional, Dict, List, Tuple
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QSpinBox, QGroupBox, QMessageBox, 
-    QTableWidget, QTableWidgetItem, QProgressBar, QFrame
+    QTableWidget, QTableWidgetItem, QProgressBar, QFrame,
+    QDoubleSpinBox, QComboBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 import pandas as pd
 import numpy as np
@@ -17,16 +18,16 @@ from ml_model import WeatherModel
 
 class MLTab(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
-        """Инициализация вкладки машинного обучения."""
         super().__init__(parent)
         self.df = None
         self.model = WeatherModel()
         self.train_data = None
         self.test_data = None
-        
-        # Инициализация интерфейса
         self.setup_logger()
         self.init_ui()
+        self.current_progress = 0
+        self.progress_timer = QTimer()
+        self.progress_timer.timeout.connect(self.update_progress_animation)
 
     def setup_logger(self) -> None:
         """Настройка логирования."""
@@ -56,15 +57,23 @@ class MLTab(QWidget):
         self.setLayout(layout)
 
     def create_left_panel(self) -> QFrame:
-        """Создание левой панели управления."""
+        """Улучшенная левая панель управления"""
         panel = QFrame()
         panel.setFrameStyle(QFrame.Shape.StyledPanel)
         layout = QVBoxLayout()
-    
+        
         # 1. Группа подготовки данных
         data_group = QGroupBox("Подготовка данных")
         data_layout = QVBoxLayout()
-    
+        
+        # Выбор целевой переменной
+        target_layout = QHBoxLayout()
+        target_layout.addWidget(QLabel("Целевая переменная:"))
+        self.target_combo = QComboBox()
+        self.target_combo.addItems(['temperature_day', 'temperature_evening'])
+        target_layout.addWidget(self.target_combo)
+        data_layout.addLayout(target_layout)
+        
         # Размер тестовой выборки
         test_size_layout = QHBoxLayout()
         test_size_layout.addWidget(QLabel("Тестовая выборка:"))
@@ -74,120 +83,96 @@ class MLTab(QWidget):
         self.test_size_spin.setSuffix("%")
         test_size_layout.addWidget(self.test_size_spin)
         data_layout.addLayout(test_size_layout)
-    
+        
         # Кнопка подготовки данных
         self.prepare_btn = QPushButton("Подготовить данные")
         self.prepare_btn.clicked.connect(self.prepare_data)
         self.prepare_btn.setEnabled(False)
         data_layout.addWidget(self.prepare_btn)
-    
+        
         data_group.setLayout(data_layout)
-
-        # 2. Группа анализа временного ряда
-        analysis_group = QGroupBox("Анализ временного ряда")
-        analysis_layout = QVBoxLayout()
-    
-        # Кнопка анализа
-        self.analyze_btn = QPushButton("Анализировать данные")
-        self.analyze_btn.clicked.connect(self.analyze_time_series)
-        self.analyze_btn.setEnabled(False)
-        analysis_layout.addWidget(self.analyze_btn)
-    
-        analysis_group.setLayout(analysis_layout)
-    
-        # 3. Группа параметров SARIMA
+        
+        # 2. Группа параметров SARIMA с улучшенным интерфейсом
         model_group = QGroupBox("Параметры SARIMA")
         model_layout = QVBoxLayout()
-    
-        # Параметры p, d, q
+        
+        # Добавляем подсказки для параметров
+        param_info = QLabel("p - авторегрессия, d - разность, q - скользящее среднее")
+        param_info.setWordWrap(True)
+        model_layout.addWidget(param_info)
+        
+        # Параметры p, d, q с десятичными значениями
         pdq_layout = QHBoxLayout()
-    
+        
         pdq_layout.addWidget(QLabel("p:"))
-        self.p_spin = QSpinBox()
+        self.p_spin = QDoubleSpinBox()
         self.p_spin.setRange(0, 3)
+        self.p_spin.setSingleStep(0.1)
         self.p_spin.setValue(1)
         pdq_layout.addWidget(self.p_spin)
-    
+        
         pdq_layout.addWidget(QLabel("d:"))
-        self.d_spin = QSpinBox()
+        self.d_spin = QDoubleSpinBox()
         self.d_spin.setRange(0, 2)
+        self.d_spin.setSingleStep(0.1)
         self.d_spin.setValue(1)
         pdq_layout.addWidget(self.d_spin)
-    
+        
         pdq_layout.addWidget(QLabel("q:"))
-        self.q_spin = QSpinBox()
+        self.q_spin = QDoubleSpinBox()
         self.q_spin.setRange(0, 3)
+        self.q_spin.setSingleStep(0.1)
         self.q_spin.setValue(1)
         pdq_layout.addWidget(self.q_spin)
-    
+        
         model_layout.addLayout(pdq_layout)
-    
-        # Сезонные параметры P, D, Q, s
+        
+        # Сезонные параметры
+        seasonal_info = QLabel("Сезонные параметры (P,D,Q - сезонные аналоги p,d,q; s - период)")
+        seasonal_info.setWordWrap(True)
+        model_layout.addWidget(seasonal_info)
+        
         seasonal_layout = QHBoxLayout()
-    
+        
         seasonal_layout.addWidget(QLabel("P:"))
-        self.P_spin = QSpinBox()
+        self.P_spin = QDoubleSpinBox()
         self.P_spin.setRange(0, 2)
+        self.P_spin.setSingleStep(0.1)
         self.P_spin.setValue(1)
         seasonal_layout.addWidget(self.P_spin)
-    
+        
         seasonal_layout.addWidget(QLabel("D:"))
-        self.D_spin = QSpinBox()
+        self.D_spin = QDoubleSpinBox()
         self.D_spin.setRange(0, 1)
+        self.D_spin.setSingleStep(0.1)
         self.D_spin.setValue(1)
         seasonal_layout.addWidget(self.D_spin)
-    
+        
         seasonal_layout.addWidget(QLabel("Q:"))
-        self.Q_spin = QSpinBox()
+        self.Q_spin = QDoubleSpinBox()
         self.Q_spin.setRange(0, 2)
+        self.Q_spin.setSingleStep(0.1)
         self.Q_spin.setValue(1)
         seasonal_layout.addWidget(self.Q_spin)
-    
+        
         seasonal_layout.addWidget(QLabel("s:"))
         self.s_spin = QSpinBox()
-        self.s_spin.setRange(1, 24)
+        self.s_spin.setRange(1, 365)  # Расширенный диапазон для годовой сезонности
         self.s_spin.setValue(7)
         seasonal_layout.addWidget(self.s_spin)
-    
+        
         model_layout.addLayout(seasonal_layout)
         model_group.setLayout(model_layout)
-    
-        # 4. Группа кнопок управления
-        control_group = QGroupBox("Управление")
-        control_layout = QVBoxLayout()
-    
-        # Кнопка обучения
-        self.train_btn = QPushButton("Обучить модель")
-        self.train_btn.clicked.connect(self.train_model)
-        self.train_btn.setEnabled(False)
-        control_layout.addWidget(self.train_btn)
-    
-        # Кнопка подбора параметров
-        self.tune_btn = QPushButton("Подобрать параметры")
-        self.tune_btn.clicked.connect(self.tune_parameters)
-        self.tune_btn.setEnabled(False)
-        control_layout.addWidget(self.tune_btn)
-    
-        # Кнопка сохранения
-        self.save_btn = QPushButton("Сохранить модель")
-        self.save_btn.clicked.connect(self.save_model)
-        self.save_btn.setEnabled(False)
-        control_layout.addWidget(self.save_btn)
-    
-        control_group.setLayout(control_layout)
-    
-        # Прогресс-бар
+        
+        # Добавляем остальные группы и элементы управления
+        layout.addWidget(data_group)
+        layout.addWidget(model_group)
+        
+        # Прогресс-бар с анимацией
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-    
-        # Добавляем все группы в основной layout
-        layout.addWidget(data_group)
-        layout.addWidget(analysis_group)
-        layout.addWidget(model_group)
-        layout.addWidget(control_group)
         layout.addWidget(self.progress_bar)
-        layout.addStretch()
-    
+        
         panel.setLayout(layout)
         return panel
 
@@ -258,33 +243,43 @@ class MLTab(QWidget):
 
 
     def prepare_data(self) -> None:
-        """Подготовка данных для обучения."""
+        """Улучшенная подготовка данных"""
         try:
             if self.df is None:
                 raise ValueError("Данные не загружены")
             
-            # Получаем размер тестовой выборки
-            test_size = self.test_size_spin.value() / 100
+            self.progress_bar.setVisible(True)
+            self.current_progress = 0
+            self.progress_timer.start(50)  # Запуск анимации
             
-            # Разделяем данные
-            split_idx = int(len(self.df) * (1 - test_size))
+            # Получаем целевую переменную
+            target_column = self.target_combo.currentText()
+            
+            # Предобработка данных
+            processed_df = self.model.preprocess_data(self.df)
+            
+            # Разделение данных
+            test_size = self.test_size_spin.value() / 100
+            split_idx = int(len(processed_df) * (1 - test_size))
             
             self.train_data = {
-                'temperature_day': self.df['temperature_day'][:split_idx]
+                target_column: processed_df[target_column][:split_idx]
             }
             
             self.test_data = {
-                'temperature_day': self.df['temperature_day'][split_idx:]
+                target_column: processed_df[target_column][split_idx:]
             }
             
             # Обновляем интерфейс
             self.train_btn.setEnabled(True)
             self.analyze_btn.setEnabled(True)
             self.tune_btn.setEnabled(True)
+            
             self.info_label.setText(
                 f"Данные подготовлены:\n"
-                f"Размер обучающей выборки: {len(self.train_data['temperature_day'])}\n"
-                f"Размер тестовой выборки: {len(self.test_data['temperature_day'])}"
+                f"Размер обучающей выборки: {len(self.train_data[target_column])}\n"
+                f"Размер тестовой выборки: {len(self.test_data[target_column])}\n"
+                f"Целевая переменная: {target_column}"
             )
             
             self.logger.info("Данные успешно подготовлены для обучения")
@@ -292,6 +287,14 @@ class MLTab(QWidget):
         except Exception as e:
             self.logger.error(f"Ошибка при подготовке данных: {str(e)}")
             QMessageBox.critical(self, "Ошибка", str(e))
+        finally:
+            self.progress_timer.stop()
+            self.progress_bar.setVisible(False)
+
+    def update_progress_animation(self):
+        """Обновление анимации прогресс-бара"""
+        self.current_progress = (self.current_progress + 1) % 101
+        self.progress_bar.setValue(self.current_progress)
 
     def analyze_time_series(self) -> None:
         """Анализ временного ряда перед обучением."""
