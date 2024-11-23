@@ -1,7 +1,10 @@
+from statsmodels.tsa.seasonal import STL
+from scipy import stats
+from scipy.signal import find_peaks
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Optional
-from statsmodels.tsa.stattools import adfuller, acf
+from statsmodels.tsa.stattools import adfuller, acf, pacf
 from statsmodels.tsa.seasonal import seasonal_decompose
 import matplotlib.pyplot as plt
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -369,9 +372,9 @@ class WeatherModel:
 
         
     def train(self, train_data: pd.Series, order: Tuple[int, int, int], 
-              seasonal_order: Tuple[int, int, int, int]) -> Dict:
+          seasonal_order: Tuple[int, int, int, int]) -> Dict:
         """
-        Обучение модели SARIMA с декомпозицией временного ряда.
+        Обучение модели SARIMA с множественной сезонностью и робастной оптимизацией.
     
         Args:
             train_data: Временной ряд температуры для обучения
@@ -384,106 +387,125 @@ class WeatherModel:
         try:
             self.logger.info(f"Начало обучения модели\n"
                             f"Параметры: order={order}, seasonal_order={seasonal_order}")
-        
+    
             if train_data is None or len(train_data) == 0:
                 raise ValueError("Пустые данные для обучения")
-            
-            # Проверяем на NaN перед началом обработки
-            if train_data.isnull().any():
+        
+            # Предварительная обработка данных
+            train_clean = train_data.copy()
+            if train_clean.isnull().any():
                 self.logger.info("Обнаружены пропущенные значения, выполняется заполнение...")
-                train_data = train_data.interpolate(method='time')
-                train_data = train_data.ffill().bfill()
-            
-            # Установка частоты
-            if not train_data.index.freq:
-                train_data = train_data.asfreq('D')
-            
-            self.logger.info(f"Размер данных: {len(train_data)}")
-            self.logger.info("Выполняется декомпозиция временного ряда...")
+                train_clean = train_clean.interpolate(method='time')
+                train_clean = train_clean.ffill().bfill()
         
-            # Декомпозиция временного ряда
-            decomposition = seasonal_decompose(train_data, period=seasonal_order[3])
+            # Устанавливаем частоту
+            if not train_clean.index.freq:
+                train_clean = train_clean.asfreq('D')
         
-            # Обработка компонентов
-            seasonal = decomposition.seasonal.interpolate(method='time')
-            seasonal = seasonal.ffill().bfill()
+            self.logger.info(f"Размер данных: {len(train_clean)}")
         
-            trend = decomposition.trend.interpolate(method='time')
-            trend = trend.ffill().bfill()
+            # Сохраняем знаки температур
+            signs = np.sign(train_clean)
         
-            residual = decomposition.resid.interpolate(method='time')
-            residual = residual.ffill().bfill()
+            # Преобразуем в положительные значения и применяем логарифмирование
+            train_transformed = np.log1p(np.abs(train_clean) + 1)
+        
+            # Выполняем декомпозицию с множественной сезонностью
+            self.logger.info("Выполняется декомпозиция с множественной сезонностью...")
+        
+            # Годовая сезонность
+            stl_year = STL(
+                train_transformed,
+                period=365,
+                robust=True
+            ).fit()
+        
+            # Недельная сезонность на остатках
+            stl_week = STL(
+                stl_year.resid,
+                period=7,
+                robust=True
+            ).fit()
+        
+            # Извлекаем компоненты
+            trend = stl_year.trend
+            seasonal_year = stl_year.seasonal
+            seasonal_week = stl_week.seasonal
+            residuals = stl_week.resid
         
             # Нормализация остатков
-            residual_mean = residual.mean()
-            residual_std = residual.std()
-            residual_normalized = (residual - residual_mean) / residual_std
+            residual_mean = residuals.mean()
+            residual_std = residuals.std()
+            residuals_normalized = (residuals - residual_mean) / residual_std
         
             self.logger.info("Создание и обучение модели SARIMA...")
         
             # Создание модели на нормализованных остатках
             model = SARIMAX(
-                residual_normalized,
+                residuals_normalized,
                 order=order,
                 seasonal_order=seasonal_order,
                 enforce_stationarity=False,
                 enforce_invertibility=False,
-                simple_differencing=True,
                 initialization='approximate_diffuse'
             )
         
-            # Обучение модели с обработкой проблем сходимости
+            # Обучение модели с робастной оптимизацией
             try:
                 self.model = model.fit(
                     disp=False,
+                    method='powell',  # Более надежный метод оптимизации
                     maxiter=1000,
-                    method='lbfgs',
                     cov_type='robust',
                     optim_score='harvey',
-                    optim_complex_step=True
+                    optim_complex_step=True,
+                    optim_hessian='cs'
                 )
             except Exception as e:
                 self.logger.warning(f"Первая попытка обучения не удалась: {str(e)}")
                 # Вторая попытка с другими параметрами
                 self.model = model.fit(
                     disp=False,
+                    method='lbfgs',
                     maxiter=2000,
-                    method='powell',
                     cov_type='robust'
                 )
         
-            self.logger.info("Получение прогноза...")
-        
-            # Получение прогноза и обратное преобразование
+            # Получение прогноза для остатков
             predicted_residuals = self.model.fittedvalues
+        
+            # Обратное преобразование остатков
             predicted_residuals = (predicted_residuals * residual_std) + residual_mean
         
-            # Восстановление прогноза с сезонностью и трендом
-            predicted_values = predicted_residuals + seasonal + trend
+            # Восстановление прогноза
+            predicted_values = pd.Series(
+                predicted_residuals + seasonal_year + seasonal_week + trend,
+                index=train_clean.index
+            )
+        
+            # Обратное преобразование из лог-шкалы
+            predicted_values = (np.expm1(predicted_values) - 1) * signs
         
             # Синхронизация индексов
-            valid_idx = train_data.index.intersection(predicted_values.index)
-            actual_values = train_data[valid_idx]
+            valid_idx = train_clean.index.intersection(predicted_values.index)
+            actual_values = train_clean[valid_idx]
             predicted_values = predicted_values[valid_idx]
         
-            # Проверка на NaN после всех преобразований
+            # Проверка на NaN
             if predicted_values.isnull().any() or actual_values.isnull().any():
                 self.logger.warning("Обнаружены NaN в результатах, выполняется финальная очистка...")
                 mask = ~(predicted_values.isnull() | actual_values.isnull())
                 actual_values = actual_values[mask]
                 predicted_values = predicted_values[mask]
         
-            self.logger.info("Расчет метрик...")
-        
-            # Расчет ошибок и метрик
+            # Расчет метрик
             errors = actual_values - predicted_values
             abs_errors = np.abs(errors)
         
             # Безопасный расчет MAPE
             with np.errstate(divide='ignore', invalid='ignore'):
-                rel_errors = abs_errors / np.abs(actual_values)
-                mape = np.nanmean(rel_errors) * 100
-        
+                mape = np.mean(np.abs(errors / actual_values)) * 100
+            
             metrics = {
                 'mse': mean_squared_error(actual_values, predicted_values),
                 'rmse': np.sqrt(mean_squared_error(actual_values, predicted_values)),
@@ -497,8 +519,9 @@ class WeatherModel:
         
             # Информация о декомпозиции
             decomposition_info = {
-                'seasonal_strength': 1 - np.var(residual)/np.var(seasonal + residual),
-                'trend_strength': 1 - np.var(residual)/np.var(trend + residual),
+                'seasonal_year_strength': 1 - np.var(residuals)/np.var(seasonal_year + residuals),
+                'seasonal_week_strength': 1 - np.var(stl_week.resid)/np.var(seasonal_week + stl_week.resid),
+                'trend_strength': 1 - np.var(residuals)/np.var(trend + residuals),
                 'residual_mean': float(residual_mean),
                 'residual_std': float(residual_std)
             }
@@ -525,7 +548,7 @@ class WeatherModel:
                     'bic': self.model.bic
                 }
             }
-        
+    
         except Exception as e:
             self.logger.error(f"Ошибка при обучении модели: {str(e)}")
             return {'status': 'error', 'message': str(e)}
