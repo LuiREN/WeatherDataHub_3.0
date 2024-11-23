@@ -227,105 +227,135 @@ class WeatherModel:
             raise
 
     def analyze_time_series(self, data: pd.Series) -> Dict:
-        """Комплексный анализ временного ряда."""
+        """
+        Расширенный анализ временного ряда с определением оптимальных параметров SARIMA.
+    
+        Args:
+            data: Временной ряд для анализа
+        
+        Returns:
+            Dict: Результаты анализа
+        """
         try:
-            self.logger.info("Начало комплексного анализа временного ряда")
-            self.logger.info(f"Размер входных данных: {len(data)}")
-        
-            # Предварительная обработка данных
-            # Удаляем NaN значения
-            data_cleaned = data.dropna()
-        
-            if len(data_cleaned) < 2:
-                raise ValueError("Недостаточно данных для анализа после удаления NaN значений")
-            
-            self.logger.info(f"Количество данных после очистки: {len(data_cleaned)}")
+            self.logger.info("Начало расширенного анализа временного ряда")
         
             results = {}
         
-            # Проверяем стационарность
-            self.logger.info("Проверка стационарности...")
-            stationarity_results = self.check_stationarity(data_cleaned)
-            if stationarity_results is not None:
-                results['stationarity'] = stationarity_results
-            else:
-                self.logger.warning("Не удалось выполнить проверку стационарности")
-                results['stationarity'] = {
-                    'test_statistic': None,
-                    'p_value': None,
-                    'is_stationary': None,
-                    'error': 'Ошибка при проверке стационарности'
-                }
+            # Базовая статистика
+            data_cleaned = data.dropna()
+            results['statistics'] = {
+                'n_observations': len(data_cleaned),
+                'mean': data_cleaned.mean(),
+                'std': data_cleaned.std(),
+                'min': data_cleaned.min(),
+                'max': data_cleaned.max(),
+                'skewness': stats.skew(data_cleaned),
+                'kurtosis': stats.kurtosis(data_cleaned)
+            }
         
-            # Анализируем автокорреляцию
-            self.logger.info("Анализ автокорреляции...")
-            autocorr_results = self.analyze_autocorrelation(data_cleaned)
-            if autocorr_results is not None:
-                results['autocorrelation'] = autocorr_results
-            else:
-                self.logger.warning("Не удалось выполнить анализ автокорреляции")
-                results['autocorrelation'] = {
-                    'significant_lags': [],
-                    'error': 'Ошибка при анализе автокорреляции'
-                }
+            # Проверка стационарности
+            stationarity = self.check_stationarity(data_cleaned)
+            results['stationarity'] = stationarity
         
-            # Создаем отчет
+            # Расширенный анализ автокорреляции
+            from statsmodels.tsa.stattools import acf, pacf
+        
+            # Вычисляем ACF и PACF для разных лагов
+            max_lags = min(len(data_cleaned) - 1, 365)  # максимум год или длина ряда
+            acf_values = acf(data_cleaned, nlags=max_lags, fft=True)
+            pacf_values = pacf(data_cleaned, nlags=max_lags)
+        
+            # Находим значимые лаги
+            confidence_interval = 1.96/np.sqrt(len(data_cleaned))
+            significant_lags_acf = [
+                (lag, val) for lag, val in enumerate(acf_values) 
+                if abs(val) > confidence_interval and lag > 0
+            ]
+            significant_lags_pacf = [
+                (lag, val) for lag, val in enumerate(pacf_values) 
+                if abs(val) > confidence_interval and lag > 0
+            ]
+        
+            # Определяем сезонные периоды
+            from scipy.signal import find_peaks
+            peaks, _ = find_peaks(acf_values, height=confidence_interval)
+            seasonal_periods = [
+                peak for peak in peaks 
+                if peak in [7, 14, 30, 90, 365, 180]  # проверяем известные периоды
+            ]
+        
+            results['autocorrelation'] = {
+                'acf_values': acf_values.tolist(),
+                'pacf_values': pacf_values.tolist(),
+                'significant_lags_acf': significant_lags_acf,
+                'significant_lags_pacf': significant_lags_pacf,
+                'seasonal_periods': seasonal_periods,
+                'confidence_interval': confidence_interval
+            }
+        
+            # Определяем оптимальные параметры SARIMA
+            # p - на основе значимых лагов PACF
+            p = min(len([lag for lag, val in significant_lags_pacf if lag <= 5]), 3)
+        
+            # q - на основе значимых лагов ACF
+            q = min(len([lag for lag, val in significant_lags_acf if lag <= 5]), 3)
+        
+            # d - на основе теста стационарности
+            d = 0 if stationarity['is_stationary'] else 1
+        
+            # Сезонные параметры
+            if seasonal_periods:
+                primary_season = min(seasonal_periods)  # выбираем минимальный период
+                P = 1
+                D = 1
+                Q = 1
+            else:
+                primary_season = 7  # недельная сезонность по умолчанию
+                P = 0
+                D = 0
+                Q = 0
+        
+            results['suggested_parameters'] = {
+                'order': (p, d, q),
+                'seasonal_order': (P, D, Q, primary_season),
+                'alternative_seasons': seasonal_periods
+            }
+        
+            # Декомпозиция временного ряда
+            for period in [primary_season] + [s for s in seasonal_periods if s != primary_season]:
+                try:
+                    decomposition = STL(
+                        data_cleaned,
+                        period=period,
+                        robust=True
+                    ).fit()
+                
+                    strength_seasonal = 1 - np.var(decomposition.resid)/np.var(decomposition.seasonal + decomposition.resid)
+                    strength_trend = 1 - np.var(decomposition.resid)/np.var(decomposition.trend + decomposition.resid)
+                
+                    results[f'decomposition_period_{period}'] = {
+                        'trend_strength': strength_trend,
+                        'seasonal_strength': strength_seasonal,
+                        'residual_std': np.std(decomposition.resid)
+                    }
+                except Exception as e:
+                    self.logger.warning(f"Ошибка при декомпозиции для периода {period}: {str(e)}")
+        
+            # Сохранение отчета
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f'results/time_series_analysis_{timestamp}.txt'
         
             os.makedirs('results', exist_ok=True)
         
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write("Анализ временного ряда температуры\n")
+                f.write("Расширенный анализ временного ряда температуры\n")
                 f.write("=" * 50 + "\n\n")
             
-                # Общая информация
-                f.write("1. Общая информация\n")
-                f.write("-" * 30 + "\n")
-                f.write(f"Исходное количество наблюдений: {len(data)}\n")
-                f.write(f"Количество наблюдений после очистки: {len(data_cleaned)}\n")
-                f.write(f"Удалено пропущенных значений: {len(data) - len(data_cleaned)}\n")
-                f.write(f"Среднее значение: {data_cleaned.mean():.2f}\n")
-                f.write(f"Стандартное отклонение: {data_cleaned.std():.2f}\n")
-                f.write(f"Минимум: {data_cleaned.min():.2f}\n")
-                f.write(f"Максимум: {data_cleaned.max():.2f}\n\n")
-            
-                # Стационарность
-                f.write("2. Анализ стационарности\n")
-                f.write("-" * 30 + "\n")
-                if 'error' in results['stationarity']:
-                    f.write(f"Ошибка: {results['stationarity']['error']}\n")
-                else:
-                    f.write(f"Тест-статистика: {results['stationarity']['test_statistic']:.4f}\n")
-                    f.write(f"p-значение: {results['stationarity']['p_value']:.4f}\n")
-                    f.write(f"Ряд {'стационарен' if results['stationarity']['is_stationary'] else 'не стационарен'}\n")
-                f.write("\n")
-            
-                # Автокорреляция
-                f.write("3. Анализ автокорреляции\n")
-                f.write("-" * 30 + "\n")
-                if 'error' in results['autocorrelation']:
-                    f.write(f"Ошибка: {results['autocorrelation']['error']}\n")
-                else:
-                    f.write(f"Количество значимых лагов: {len(results['autocorrelation']['significant_lags'])}\n")
-                    if results['autocorrelation']['significant_lags']:
-                        f.write("Значимые лаги:\n")
-                        for lag, value in results['autocorrelation']['significant_lags'][:5]:
-                            f.write(f"Лаг {lag}: {value:.4f}\n")
-            
-                f.write(f"\nДата создания отчета: {timestamp}")
+                # Записываем результаты анализа
+                self._write_analysis_report(f, results)
         
-            self.logger.info(f"Анализ завершен, результаты сохранены в {filename}")
-        
-            # Добавляем путь к файлу и статистику в результаты
             results['report_file'] = filename
-            results['statistics'] = {
-                'n_observations': len(data_cleaned),
-                'mean': data_cleaned.mean(),
-                'std': data_cleaned.std(),
-                'min': data_cleaned.min(),
-                'max': data_cleaned.max()
-            }
+            self.logger.info(f"Анализ временного ряда завершен, результаты сохранены в {filename}")
         
             return results
         
@@ -777,3 +807,59 @@ class WeatherModel:
         
         except Exception as e:
             self.logger.error(f"Ошибка при сохранении отчета: {str(e)}")
+
+    def _write_analysis_report(self, f, results: Dict) -> None:
+        """
+        Запись результатов анализа в файл.
+    
+        Args:
+            f: Файловый объект для записи
+            results: Словарь с результатами анализа
+        """
+        try:
+            # Базовая статистика
+            f.write("1. Общая статистика\n")
+            f.write("-" * 30 + "\n")
+            stats = results['statistics']
+            f.write(f"Количество наблюдений: {stats['n_observations']}\n")
+            f.write(f"Среднее значение: {stats['mean']:.2f}\n")
+            f.write(f"Стандартное отклонение: {stats['std']:.2f}\n")
+            f.write(f"Минимум: {stats['min']:.2f}\n")
+            f.write(f"Максимум: {stats['max']:.2f}\n")
+            f.write(f"Асимметрия: {stats['skewness']:.2f}\n")
+            f.write(f"Эксцесс: {stats['kurtosis']:.2f}\n\n")
+        
+            # Стационарность
+            f.write("2. Анализ стационарности\n")
+            f.write("-" * 30 + "\n")
+            stationarity = results['stationarity']
+            f.write(f"Тест-статистика: {stationarity['test_statistic']:.4f}\n")
+            f.write(f"p-значение: {stationarity['p_value']:.4f}\n")
+            f.write(f"Ряд {'стационарен' if stationarity['is_stationary'] else 'не стационарен'}\n\n")
+        
+            # Автокорреляция
+            f.write("3. Анализ автокорреляции\n")
+            f.write("-" * 30 + "\n")
+            autocorr = results['autocorrelation']
+            f.write(f"Количество значимых лагов ACF: {len(autocorr['significant_lags_acf'])}\n")
+            f.write(f"Количество значимых лагов PACF: {len(autocorr['significant_lags_pacf'])}\n")
+            f.write("Обнаруженные сезонные периоды: " + 
+                    ", ".join(map(str, autocorr['seasonal_periods'])) + "\n\n")
+        
+            # Рекомендуемые параметры
+            f.write("4. Рекомендуемые параметры SARIMA\n")
+            f.write("-" * 30 + "\n")
+            params = results['suggested_parameters']
+            f.write(f"order (p,d,q): {params['order']}\n")
+            f.write(f"seasonal_order (P,D,Q,s): {params['seasonal_order']}\n")
+            f.write("Альтернативные сезонные периоды: " + 
+                    ", ".join(map(str, params['alternative_seasons'])) + "\n\n")
+        
+            # Декомпозиция
+            f.write("5. Анализ декомпозиции\n")
+            f.write("-" * 30 + "\n")
+            for key, value in results.items():
+                if key.startswith('decomposition_period_'):
+                    period = key.split('_')[-1]
+                    f.write(f"\nПериод {period}:\n")
+                    f.write(f"Сила тренда: {value['trend_strength']:.4f}\n")
