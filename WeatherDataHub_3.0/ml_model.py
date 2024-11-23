@@ -128,42 +128,103 @@ class WeatherModel:
             return {'error': str(e)}
 
     def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Улучшенная предобработка данных"""
-        df = df.copy()
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
-        df.sort_index(inplace=True)
+        """
+        Предобработка данных с учетом сезонности и стабилизации дисперсии.
+    
+        Args:
+            df: DataFrame с исходными данными
         
-        # Обработка категориальных признаков
-        categorical_columns = [col for col in df.columns if 'cloudiness' in col or 'wind_direction' in col]
-        df[categorical_columns] = df[categorical_columns].fillna(0)
+        Returns:
+            DataFrame: Обработанные данные
+        """
+        try:
+            self.logger.info("Начало предобработки данных")
+            df_copy = df.copy()
         
-        # Обработка числовых признаков
-        numeric_columns = ['temperature_day', 'temperature_evening', 'pressure_day', 
-                         'pressure_evening', 'wind_speed_day', 'wind_speed_evening']
+            if 'date' in df_copy.columns:
+                df_copy['date'] = pd.to_datetime(df_copy['date'])
+                df_copy.set_index('date', inplace=True)
         
-        for col in numeric_columns:
-            if col in df.columns:
-                # Обработка выбросов
-                Q1 = df[col].quantile(0.25)
-                Q3 = df[col].quantile(0.75)
-                IQR = Q3 - Q1
-                lower_bound = Q1 - 2 * IQR
-                upper_bound = Q3 + 2 * IQR
-                df[col] = df[col].clip(lower_bound, upper_bound)
+            df_copy.sort_index(inplace=True)
+            df_copy = df_copy.asfreq('D')
+        
+            # Работаем с температурными данными
+            temp_columns = ['temperature_day', 'temperature_evening']
+            for col in temp_columns:
+                if col in df_copy.columns:
+                    # Сохраняем знаки температур
+                    signs = np.sign(df_copy[col])
                 
-                # Заполнение пропусков
-                if 'temperature' in col:
-                    # Для температуры используем сезонную интерполяцию
-                    df[col] = df[col].interpolate(method='time', limit_direction='both', order=3)
-                elif 'pressure' in col:
-                    # Для давления используем линейную интерполяцию
-                    df[col] = df[col].interpolate(method='linear', limit_direction='both')
-                else:
-                    # Для остальных числовых признаков используем скользящее среднее
-                    df[col] = df[col].fillna(df[col].rolling(window=3, min_periods=1).mean())
+                    # Преобразуем в положительные значения для логарифмирования
+                    df_copy[col] = np.abs(df_copy[col]) + 1  # +1 для избежания log(0)
+                
+                    # Логарифмируем для стабилизации дисперсии
+                    df_copy[col] = np.log1p(df_copy[col])
+                
+                    # STL декомпозиция для определения тренда и сезонности
+                    from statsmodels.tsa.seasonal import STL
+                
+                    # Заполняем пропуски для возможности декомпозиции
+                    temp_filled = df_copy[col].fillna(method='ffill').fillna(method='bfill')
+                
+                    # Выполняем декомпозицию с годовой и недельной сезонностью
+                    stl_year = STL(temp_filled, period=365, robust=True).fit()
+                    stl_week = STL(stl_year.resid, period=7, robust=True).fit()
+                
+                    # Получаем тренд и сезонные компоненты
+                    trend = stl_year.trend
+                    seasonal_year = stl_year.seasonal
+                    seasonal_week = stl_week.seasonal
+                
+                    # Заполняем пропуски с учетом тренда и сезонности
+                    df_copy[col] = df_copy[col].fillna(trend + seasonal_year + seasonal_week)
+                
+                    # Обрабатываем выбросы
+                    Q1 = df_copy[col].quantile(0.25)
+                    Q3 = df_copy[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 3 * IQR  # Используем 3*IQR вместо 1.5*IQR для большей гибкости
+                    upper_bound = Q3 + 3 * IQR
+                
+                    # Обрезаем выбросы с учетом сезонности
+                    df_copy[col] = df_copy[col].clip(lower=lower_bound, upper=upper_bound)
+                
+                    # Возвращаем исходный масштаб
+                    df_copy[col] = (np.expm1(df_copy[col]) - 1) * signs
         
-        return df
+            # Обработка давления
+            pressure_columns = ['pressure_day', 'pressure_evening']
+            for col in pressure_columns:
+                if col in df_copy.columns:
+                    # Заполняем пропуски с учетом тренда
+                    df_copy[col] = df_copy[col].interpolate(method='time')
+                    df_copy[col] = df_copy[col].fillna(method='ffill').fillna(method='bfill')
+        
+            # Обработка облачности (бинарные признаки)
+            cloud_columns = [col for col in df_copy.columns if 'cloudiness' in col]
+            for col in cloud_columns:
+                df_copy[col] = df_copy[col].fillna(0)
+        
+            # Обработка ветра
+            wind_columns = [col for col in df_copy.columns if 'wind' in col]
+            for col in wind_columns:
+                if 'speed' in col:
+                    # Для скорости ветра используем скользящее среднее
+                    df_copy[col] = df_copy[col].fillna(
+                        df_copy[col].rolling(window=7, min_periods=1).mean()
+                    )
+                else:
+                    # Для направления ветра используем моду
+                    df_copy[col] = df_copy[col].fillna(
+                        df_copy[col].mode()[0] if not df_copy[col].mode().empty else 0
+                    )
+        
+            self.logger.info("Предобработка данных завершена успешно")
+            return df_copy
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка при предобработке данных: {str(e)}")
+            raise
 
     def analyze_time_series(self, data: pd.Series) -> Dict:
         """Комплексный анализ временного ряда."""
@@ -279,55 +340,147 @@ class WeatherModel:
         
     def train(self, train_data: pd.Series, order: Tuple[int, int, int], 
               seasonal_order: Tuple[int, int, int, int]) -> Dict:
-        """Улучшенное обучение модели SARIMA"""
+        """
+        Обучение модели SARIMA с декомпозицией временного ряда.
+    
+        Args:
+            train_data: Временной ряд температуры для обучения
+            order: Параметры (p,d,q)
+            seasonal_order: Сезонные параметры (P,D,Q,s)
+    
+        Returns:
+            Dict: Результаты обучения
+        """
         try:
             self.logger.info(f"Начало обучения модели\n"
-                           f"Параметры: order={order}, seasonal_order={seasonal_order}")
+                            f"Параметры: order={order}, seasonal_order={seasonal_order}")
+        
+            if train_data is None or len(train_data) == 0:
+                raise ValueError("Пустые данные для обучения")
             
-            # Проверка и подготовка данных
+            # Проверяем на NaN перед началом обработки
             if train_data.isnull().any():
-                raise ValueError("Обнаружены пропущенные значения в данных")
+                self.logger.info("Обнаружены пропущенные значения, выполняется заполнение...")
+                train_data = train_data.interpolate(method='time')
+                train_data = train_data.ffill().bfill()
             
+            # Установка частоты
+            if not train_data.index.freq:
+                train_data = train_data.asfreq('D')
+            
+            self.logger.info(f"Размер данных: {len(train_data)}")
+            self.logger.info("Выполняется декомпозиция временного ряда...")
+        
             # Декомпозиция временного ряда
             decomposition = seasonal_decompose(train_data, period=seasonal_order[3])
-            seasonal = decomposition.seasonal
-            resid = decomposition.resid
-            
-            # Создание модели с оптимизированными параметрами
+        
+            # Обработка компонентов
+            seasonal = decomposition.seasonal.interpolate(method='time')
+            seasonal = seasonal.ffill().bfill()
+        
+            trend = decomposition.trend.interpolate(method='time')
+            trend = trend.ffill().bfill()
+        
+            residual = decomposition.resid.interpolate(method='time')
+            residual = residual.ffill().bfill()
+        
+            # Нормализация остатков
+            residual_mean = residual.mean()
+            residual_std = residual.std()
+            residual_normalized = (residual - residual_mean) / residual_std
+        
+            self.logger.info("Создание и обучение модели SARIMA...")
+        
+            # Создание модели на нормализованных остатках
             model = SARIMAX(
-                train_data,
+                residual_normalized,
                 order=order,
                 seasonal_order=seasonal_order,
                 enforce_stationarity=False,
                 enforce_invertibility=False,
-                initialization='approximate_diffuse',
-                hamilton_representation=True,
-                concentrate_scale=True
+                simple_differencing=True,
+                initialization='approximate_diffuse'
             )
-            
-            # Обучение с оптимизированными параметрами
-            self.model = model.fit(
-                disp=False,
-                maxiter=1000,
-                method='lbfgs',
-                optim_score='harvey',
-                cov_type='robust'
-            )
-            
-            # Получение прогноза на тренировочном наборе
-            train_predictions = self.model.get_prediction(start=0)
-            predicted_values = train_predictions.predicted_mean
-            
-            # Расчет расширенных метрик
+        
+            # Обучение модели с обработкой проблем сходимости
+            try:
+                self.model = model.fit(
+                    disp=False,
+                    maxiter=1000,
+                    method='lbfgs',
+                    cov_type='robust',
+                    optim_score='harvey',
+                    optim_complex_step=True
+                )
+            except Exception as e:
+                self.logger.warning(f"Первая попытка обучения не удалась: {str(e)}")
+                # Вторая попытка с другими параметрами
+                self.model = model.fit(
+                    disp=False,
+                    maxiter=2000,
+                    method='powell',
+                    cov_type='robust'
+                )
+        
+            self.logger.info("Получение прогноза...")
+        
+            # Получение прогноза и обратное преобразование
+            predicted_residuals = self.model.fittedvalues
+            predicted_residuals = (predicted_residuals * residual_std) + residual_mean
+        
+            # Восстановление прогноза с сезонностью и трендом
+            predicted_values = predicted_residuals + seasonal + trend
+        
+            # Синхронизация индексов
+            valid_idx = train_data.index.intersection(predicted_values.index)
+            actual_values = train_data[valid_idx]
+            predicted_values = predicted_values[valid_idx]
+        
+            # Проверка на NaN после всех преобразований
+            if predicted_values.isnull().any() or actual_values.isnull().any():
+                self.logger.warning("Обнаружены NaN в результатах, выполняется финальная очистка...")
+                mask = ~(predicted_values.isnull() | actual_values.isnull())
+                actual_values = actual_values[mask]
+                predicted_values = predicted_values[mask]
+        
+            self.logger.info("Расчет метрик...")
+        
+            # Расчет ошибок и метрик
+            errors = actual_values - predicted_values
+            abs_errors = np.abs(errors)
+        
+            # Безопасный расчет MAPE
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rel_errors = abs_errors / np.abs(actual_values)
+                mape = np.nanmean(rel_errors) * 100
+        
             metrics = {
-                'mse': mean_squared_error(train_data, predicted_values),
-                'rmse': np.sqrt(mean_squared_error(train_data, predicted_values)),
-                'mae': mean_absolute_error(train_data, predicted_values),
-                'aic': self.model.aic,
-                'bic': self.model.bic,
-                'seasonal_strength': 1 - np.var(resid)/np.var(seasonal + resid)
+                'mse': mean_squared_error(actual_values, predicted_values),
+                'rmse': np.sqrt(mean_squared_error(actual_values, predicted_values)),
+                'mae': mean_absolute_error(actual_values, predicted_values),
+                'mape': mape,
+                'mean_error': np.mean(errors),
+                'std_error': np.std(errors),
+                'max_error': np.max(abs_errors),
+                'min_error': np.min(abs_errors)
             }
-            
+        
+            # Информация о декомпозиции
+            decomposition_info = {
+                'seasonal_strength': 1 - np.var(residual)/np.var(seasonal + residual),
+                'trend_strength': 1 - np.var(residual)/np.var(trend + residual),
+                'residual_mean': float(residual_mean),
+                'residual_std': float(residual_std)
+            }
+        
+            self.logger.info(
+                f"Результаты обучения:\n"
+                f"MSE: {metrics['mse']:.4f}\n"
+                f"RMSE: {metrics['rmse']:.4f}\n"
+                f"MAE: {metrics['mae']:.4f}\n"
+                f"MAPE: {metrics['mape']:.2f}%"
+            )
+        
             return {
                 'status': 'success',
                 'metrics': metrics,
@@ -335,132 +488,126 @@ class WeatherModel:
                     'order': order,
                     'seasonal_order': seasonal_order
                 },
+                'decomposition': decomposition_info,
                 'model_info': {
-                    'nobs': self.model.nobs,
-                    'seasonal_periods': seasonal_order[3]
+                    'nobs': len(actual_values),
+                    'aic': self.model.aic,
+                    'bic': self.model.bic
                 }
             }
-            
+        
         except Exception as e:
             self.logger.error(f"Ошибка при обучении модели: {str(e)}")
             return {'status': 'error', 'message': str(e)}
 
     def tune_parameters(self) -> Dict:
         """
-        Перебор гиперпараметров модели.
-        Проверяет различные комбинации параметров и записывает результаты.
+        Подбор оптимальных параметров модели SARIMA для погодных данных.
     
         Returns:
-            Dict: Результаты подбора параметров
+            Dict: Лучшие найденные параметры и результаты
         """
         try:
-            # Определяем диапазоны параметров
-            parameter_ranges = {
-                'p': [0, 1, 2],
-                'd': [0, 1],
-                'q': [0, 1, 2],
-                'P': [0, 1],
-                'D': [0, 1],
-                'Q': [0, 1],
-                's': [7, 12]  # недельная и годовая сезонность
-            }
+            self.logger.info("Начало подбора параметров...")
+        
+            # Параметры оптимизированы для температурных данных
+            parameter_combinations = [
+                # (p, d, q, P, D, Q, s)
+                (1, 1, 1, 1, 1, 1, 7),    # базовая недельная модель
+                (2, 1, 2, 0, 1, 1, 7),    # более сложная недельная модель
+                (2, 0, 2, 1, 1, 1, 7),    # недельная без разности
+                (1, 1, 1, 1, 1, 1, 30),   # месячная сезонность
+                (2, 1, 2, 1, 1, 1, 30),   # сложная месячная модель
+                (2, 1, 2, 1, 1, 1, 90),   # квартальная сезонность
+                (1, 1, 2, 1, 1, 1, 7),    # асимметричная недельная модель
+                (3, 1, 1, 1, 1, 1, 7)     # с увеличенным AR
+            ]
         
             results = []
             best_result = None
             best_rmse = float('inf')
         
-            self.logger.info("Начало подбора гиперпараметров")
+            total_combinations = len(parameter_combinations)
+            self.logger.info(f"Всего комбинаций для проверки: {total_combinations}")
         
-            # Основные параметры (p, d, q)
-            for p in parameter_ranges['p']:
-                for d in parameter_ranges['d']:
-                    for q in parameter_ranges['q']:
-                        # Сезонные параметры (P, D, Q, s)
-                        for P in parameter_ranges['P']:
-                            for D in parameter_ranges['D']:
-                                for Q in parameter_ranges['Q']:
-                                    for s in parameter_ranges['s']:
-                                        # Формируем параметры
-                                        order = (p, d, q)
-                                        seasonal_order = (P, D, Q, s)
-                                    
-                                        try:
-                                            # Обучаем модель
-                                            train_result = self.train(
-                                                self.train_data,
-                                                order,
-                                                seasonal_order
-                                            )
-                                        
-                                            if train_result['status'] == 'success':
-                                                # Записываем результаты
-                                                result = {
-                                                    'parameters': {
-                                                        'order': order,
-                                                        'seasonal_order': seasonal_order
-                                                    },
-                                                    'metrics': train_result['metrics'],
-                                                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                                }
-                                            
-                                                results.append(result)
-                                            
-                                                # Проверяем, лучший ли это результат
-                                                current_rmse = train_result['metrics']['rmse']
-                                                if current_rmse < best_rmse:
-                                                    best_rmse = current_rmse
-                                                    best_result = result
-                                                
-                                                self.logger.info(
-                                                    f"Проверена комбинация: order={order}, "
-                                                    f"seasonal_order={seasonal_order}, "
-                                                    f"RMSE={current_rmse:.4f}"
-                                                )
-                                            
-                                        except Exception as e:
-                                            self.logger.warning(
-                                                f"Ошибка при проверке комбинации "
-                                                f"order={order}, seasonal_order={seasonal_order}: {str(e)}"
-                                            )
-                                            continue
+            for i, params in enumerate(parameter_combinations, 1):
+                try:
+                    self.logger.info(f"Проверка комбинации {i}/{total_combinations}: {params}")
+                    order = params[:3]
+                    seasonal_order = params[3:]
+                
+                    # Пробуем обучить модель с текущими параметрами
+                    result = self.train(
+                        self.train_data['temperature_day'],
+                        order,
+                        seasonal_order
+                    )
+                
+                    if result['status'] == 'success':
+                        results.append(result)
+                        current_rmse = result['metrics']['rmse']
+                    
+                        if current_rmse < best_rmse:
+                            best_rmse = current_rmse
+                            best_result = result.copy()
+                            best_result['parameters']['combination_index'] = i
+                        
+                            self.logger.info(
+                                f"Найдена лучшая модель:\n"
+                                f"RMSE: {best_rmse:.4f}\n"
+                                f"Параметры: order={order}, seasonal_order={seasonal_order}"
+                            )
+                        
+                except Exception as e:
+                    self.logger.warning(
+                        f"Ошибка для параметров {params}: {str(e)}\n"
+                        "Продолжаем с следующей комбинацией..."
+                    )
+                    continue
         
-            # Сохраняем результаты
+            if not best_result:
+                raise ValueError("Не удалось найти работающую комбинацию параметров")
+            
+            # Сохраняем отчет о подборе параметров
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             results_file = f'results/parameter_tuning_{timestamp}.txt'
         
             with open(results_file, 'w', encoding='utf-8') as f:
-                f.write("Результаты подбора гиперпараметров SARIMA\n")
+                f.write("Результаты подбора параметров SARIMA\n")
                 f.write("=" * 50 + "\n\n")
             
-                # Лучший результат
-                f.write("Лучшая комбинация параметров:\n")
-                f.write("-" * 30 + "\n")
-                f.write(f"order: {best_result['parameters']['order']}\n")
-                f.write(f"seasonal_order: {best_result['parameters']['seasonal_order']}\n")
+                # Лучшие параметры
+                f.write("Лучшие параметры:\n")
+                f.write("-" * 20 + "\n")
+                f.write(f"Order (p,d,q): {best_result['parameters']['order']}\n")
+                f.write(f"Seasonal Order (P,D,Q,s): {best_result['parameters']['seasonal_order']}\n")
                 f.write(f"RMSE: {best_result['metrics']['rmse']:.4f}\n")
                 f.write(f"MSE: {best_result['metrics']['mse']:.4f}\n")
+                f.write(f"MAE: {best_result['metrics']['mae']:.4f}\n")
                 f.write(f"MAPE: {best_result['metrics']['mape']:.2f}%\n\n")
             
                 # Все результаты
                 f.write("Все проверенные комбинации:\n")
-                f.write("-" * 30 + "\n")
+                f.write("-" * 20 + "\n")
                 for result in results:
-                    f.write(f"\norder: {result['parameters']['order']}\n")
-                    f.write(f"seasonal_order: {result['parameters']['seasonal_order']}\n")
+                    f.write(f"\nOrder: {result['parameters']['order']}\n")
+                    f.write(f"Seasonal Order: {result['parameters']['seasonal_order']}\n")
                     f.write(f"RMSE: {result['metrics']['rmse']:.4f}\n")
-                    f.write(f"MSE: {result['metrics']['mse']:.4f}\n")
                     f.write(f"MAPE: {result['metrics']['mape']:.2f}%\n")
+                    if 'decomposition' in result:
+                        f.write(f"Сила сезонности: {result['decomposition']['seasonal_strength']:.4f}\n")
                     f.write("-" * 20 + "\n")
-                
-            return {
-                'best_result': best_result,
-                'all_results': results,
-                'results_file': results_file
-            }
+            
+                # Дополнительная информация
+                f.write(f"\nВсего проверено комбинаций: {len(results)}\n")
+                f.write(f"Дата создания отчета: {timestamp}")
+        
+            self.logger.info(f"Результаты подбора параметров сохранены в {results_file}")
+            return best_result
         
         except Exception as e:
             self.logger.error(f"Ошибка при подборе параметров: {str(e)}")
-            return {'error': str(e)}
+            return {'status': 'error', 'message': str(e)}
     
     def predict(self, steps: int) -> Optional[np.ndarray]:
         """

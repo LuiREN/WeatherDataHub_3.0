@@ -103,6 +103,7 @@ class DataHandler:
             prepared_df['date'] = pd.to_datetime(prepared_df['date'])
             prepared_df.set_index('date', inplace=True)
             prepared_df.sort_index(inplace=True)
+            prepared_df = prepared_df.asfreq('D')
             
             # Обработка выбросов для температуры
             for col in ['temperature_day', 'temperature_evening']:
